@@ -1,8 +1,6 @@
 streamlit
 yfinance
 pandas
-numpy==1.26.4
+numpy
 plotly
 scipy
-statsmodels
-pandas-ta
