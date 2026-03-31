@@ -28,11 +28,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. MOTOR DE DATOS LOCAL
+# 2. MOTOR DE DATOS LOCAL BLINDADO
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y"):
-    formatted_tickers = [t.strip().upper() + ".MX" if not t.upper().endswith(".MX") else t.strip().upper() for t in tickers.split(",")]
+    formatted_tickers = []
+    for t in tickers.split(","):
+        t = t.strip().upper()
+        if not t: continue
+        # Si es un indice bursatil como ^MXX, no le agregamos .MX
+        if t.startswith("^"):
+            formatted_tickers.append(t)
+        elif not t.endswith(".MX"):
+            formatted_tickers.append(t + ".MX")
+        else:
+            formatted_tickers.append(t)
+            
     if "^MXX" not in formatted_tickers:
         formatted_tickers.append("^MXX") 
     
@@ -41,12 +52,28 @@ def fetch_market_data(tickers, period="5y"):
     if data.empty:
         return None, None
         
-    prices = data['Adj Close'] if 'Adj Close' in data else data['Close']
+    # Extraer precios de cierre
+    if 'Adj Close' in data:
+        prices = data['Adj Close']
+    elif 'Close' in data:
+        prices = data['Close']
+    else:
+        return None, None
+        
+    # FIX DEL KEYERROR: Si Yahoo devuelve 1 solo ticker, lo transforma de Lista (Series) a Tabla (DataFrame)
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame(name=formatted_tickers[0])
+        
     prices = prices.ffill().bfill()
     
+    # Validacion de Liquidez
     low_liquidity = []
     if 'Volume' in data:
-        volume = data['Volume'].ffill().bfill()
+        volume = data['Volume']
+        if isinstance(volume, pd.Series):
+            volume = volume.to_frame(name=formatted_tickers[0])
+        volume = volume.ffill().bfill()
+        
         for t in formatted_tickers:
             if t != "^MXX" and t in volume.columns:
                 if volume[t].mean() < 10000:
@@ -58,23 +85,19 @@ def fetch_market_data(tickers, period="5y"):
 # 3. CORE ANALITICO PURE PYTHON (SIN DEPENDENCIAS EXTERNAS)
 # ==========================================
 def calc_beta_alpha_pure(stock_returns, market_returns, rf_daily):
-    # Alineacion de datos y eliminacion de nulos
     df = pd.concat([stock_returns, market_returns], axis=1).dropna()
     if df.empty or len(df) < 2: return 0, 0
     
     y = df.iloc[:, 0] - rf_daily
     x = df.iloc[:, 1] - rf_daily
     
-    # Matriz de covarianza
     cov_matrix = np.cov(y, x)
     beta = cov_matrix[0, 1] / cov_matrix[1, 1]
     
-    # Interseccion (Alfa diaria)
     alpha_daily = y.mean() - beta * x.mean()
     return beta, alpha_daily * 252
 
 def calc_bbands_pure(df, window=20, num_std=2):
-    # Calculo nativo de Bollinger Bands
     df['SMA'] = df['Close'].rolling(window=window).mean()
     df['STD'] = df['Close'].rolling(window=window).std()
     df['BBU'] = df['SMA'] + (df['STD'] * num_std)
@@ -187,6 +210,10 @@ elif menu == "[EQUITY]":
                 beta, alpha = calc_beta_alpha_pure(ret[t_str], ret["^MXX"], rf_daily)
                 
                 df_ta = yf.download(t_str, period="1y", progress=False)
+                # FIX para evitar errores si yfinance devuelve Serie
+                if isinstance(df_ta, pd.Series):
+                    df_ta = df_ta.to_frame()
+                    
                 df_ta = calc_bbands_pure(df_ta)
                 
                 st.markdown("### FUNDAMENTALS & QUANTS")
