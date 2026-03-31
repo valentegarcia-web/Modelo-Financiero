@@ -12,10 +12,8 @@ st.set_page_config(page_title="CONFIDELIS - Wealth Analytics", layout="wide", in
 
 COLOR_FONDO = "#0E1117"
 COLOR_PANEL = "#1A1C23"
-COLOR_ACENTO = "#00A4A6"  # Turquesa Institucional
+COLOR_ACENTO = "#00A4A6"  
 COLOR_TEXTO = "#E0E0E0"
-COLOR_VERDE = "#28A745"
-COLOR_ROJO = "#DC3545"
 
 st.markdown(f"""
     <style>
@@ -43,7 +41,6 @@ st.markdown(f"""
     div[data-testid="stMetricValue"] {{ color: {COLOR_ACENTO} !important; font-size: 1.8rem !important; font-weight: bold; }}
     div[data-testid="stMetricLabel"] {{ color: #A0A0A0 !important; font-size: 0.9rem !important; text-transform: uppercase; letter-spacing: 1px; }}
     
-    /* Tablas */
     .stDataFrame {{ background-color: {COLOR_PANEL}; border-radius: 8px; }}
     </style>
 """, unsafe_allow_html=True)
@@ -52,16 +49,15 @@ st.markdown(f"""
 # 2. SISTEMA DE MEMORIA (STATE MANAGEMENT)
 # ==========================================
 if 'cartera' not in st.session_state:
-    st.session_state['cartera'] = []  # Lista de diccionarios para guardar activos
+    st.session_state['cartera'] = []  
 
 # ==========================================
 # 3. MOTORES ANALITICOS Y DE DATOS
 # ==========================================
-@st.cache_data(ttl=300) # Se actualiza cada 5 minutos
+@st.cache_data(ttl=300) 
 def fetch_market_data(tickers_list, period="5y"):
     if not tickers_list: return None
     
-    # Asegurar que siempre bajamos el IPC para calcular Betas
     if "^MXX" not in tickers_list:
         tickers_list.append("^MXX")
         
@@ -144,7 +140,6 @@ if menu == "Analisis Individual de Acciones":
                 c3.metric("Alfa (Exceso Retorno)", f"{alpha:.2%}")
                 c4.metric("CAPM (Retorno Esperado)", f"{capm_e:.2%}")
                 
-                # Grafico Tecnico
                 df_ta = yf.download(t_str, period="1y", progress=False)
                 if isinstance(df_ta, pd.Series): df_ta = df_ta.to_frame()
                 df_ta = calc_bbands_pure(df_ta)
@@ -164,10 +159,9 @@ if menu == "Analisis Individual de Acciones":
 # 6. MODULO 2: GESTION DE PORTAFOLIO COMPLETO
 # ==========================================
 elif menu == "Analisis de Portafolio Completo":
-    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Consolidado de Portafolio</h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Consolidado de Portafolio y Riesgos</h2>", unsafe_allow_html=True)
     
-    # 6.1 Constructor de Portafolio (Inputs)
-    with st.expander("➕ AGREGAR ACTIVOS AL PORTAFOLIO", expanded=True):
+    with st.expander("AGREGAR ACTIVOS AL PORTAFOLIO", expanded=True):
         with st.form("add_asset_form"):
             c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
             with c1:
@@ -189,29 +183,23 @@ elif menu == "Analisis de Portafolio Completo":
                 })
                 st.rerun()
 
-    # Boton para limpiar cartera
     if len(st.session_state['cartera']) > 0:
-        if st.button("Limpiar Portafolio", type="secondary"):
+        if st.button("Limpiar Portafolio"):
             st.session_state['cartera'] = []
             st.rerun()
 
-    # 6.2 Procesamiento y Tabla de Resultados
     if len(st.session_state['cartera']) == 0:
         st.info("Su portafolio esta vacio. Agregue activos utilizando el panel superior.")
     else:
-        # Extraer lista unica de tickers
         tickers_cartera = list(set([item["Ticker"] for item in st.session_state['cartera']]))
         
         with st.spinner("Conectando al mercado para valuar su portafolio en tiempo real..."):
             precios_historicos = fetch_market_data(tickers_cartera, "3y")
             
             if precios_historicos is not None:
-                # Consolidar datos de la cartera
                 df_cartera = pd.DataFrame(st.session_state['cartera'])
-                # Agrupar por si el usuario metio la misma accion dos veces
                 df_cartera = df_cartera.groupby("Ticker").agg({"Acciones": "sum", "Precio_Compra": "mean"}).reset_index()
                 
-                # Calcular metricas financieras por activo
                 saldo_inicial_total = 0
                 saldo_actual_total = 0
                 
@@ -228,20 +216,15 @@ elif menu == "Analisis de Portafolio Completo":
                     acciones = row["Acciones"]
                     p_compra = row["Precio_Compra"]
                     
-                    # Saldo Inicial
                     s_inicial = acciones * p_compra
                     saldo_inicial_total += s_inicial
                     
-                    # Saldo Actual (Mercado)
                     p_actual = precios_historicos[t].iloc[-1] if t in precios_historicos.columns else p_compra
                     s_actual = acciones * p_actual
                     saldo_actual_total += s_actual
                     
-                    # Rendimiento Latente
-                    rend_dinero = s_actual - s_inicial
                     rend_pct = (s_actual / s_inicial) - 1
                     
-                    # Matematicas de Riesgo
                     beta, alpha = calc_beta_alpha_pure(retornos[t], ret_mercado, rf_daily) if t in retornos.columns else (0, 0)
                     capm = rf_total + beta * (rend_mercado_anual - rf_total)
                     
@@ -251,37 +234,68 @@ elif menu == "Analisis de Portafolio Completo":
                     filas_tabla.append({
                         "Activo": t,
                         "Acciones": acciones,
-                        "Precio Compra": f"${p_compra:,.2f}",
-                        "Precio Actual": f"${p_actual:,.2f}",
+                        "Precio Compra": p_compra,
+                        "Precio Actual": p_actual,
                         "Saldo Inicial": s_inicial,
                         "Saldo Actual": s_actual,
                         "Rendimiento": rend_pct,
                         "Beta": beta
                     })
                 
-                # Crear DataFrame final
                 df_resumen = pd.DataFrame(filas_tabla)
-                
-                # Calcular Pesos (%) del Portafolio basados en Saldo Actual
                 df_resumen["Peso %"] = df_resumen["Saldo Actual"] / saldo_actual_total
                 
-                # Calcular Metricas Ponderadas del Portafolio Completo
+                # --- MATEMATICAS AVANZADAS DEL PORTAFOLIO ---
+                # 1. Beta y CAPM Ponderados
                 beta_portafolio = sum(df_resumen["Peso %"] * df_resumen["Beta"])
                 capm_portafolio = sum(df_resumen["Peso %"] * df_resumen["Activo"].map(capm_dict))
                 rendimiento_global_pct = (saldo_actual_total / saldo_inicial_total) - 1
                 
+                # 2. Retornos historicos diarios de TODO el portafolio (ponderados)
+                activos_validos = [t for t in df_resumen["Activo"].tolist() if t in retornos.columns]
+                pesos_validos = df_resumen.set_index("Activo").loc[activos_validos, "Peso %"].values
+                
+                if len(activos_validos) > 0:
+                    ret_cartera_diario = (retornos[activos_validos] * pesos_validos).sum(axis=1)
+                    
+                    # Volatilidad y Retorno Anualizado del Portafolio
+                    port_vol_annual = ret_cartera_diario.std() * np.sqrt(252)
+                    port_ret_annual = ret_cartera_diario.mean() * 252
+                    
+                    # 3. Value at Risk (VaR) Parametrico al 95% (Z = 1.645)
+                    var_95_pct = 1.645 * port_vol_annual
+                    var_95_mxn = saldo_actual_total * var_95_pct
+                    
+                    # 4. Indices de Calidad
+                    sharpe = (port_ret_annual - rf_total) / port_vol_annual if port_vol_annual > 0 else 0
+                    treynor = (port_ret_annual - rf_total) / beta_portafolio if beta_portafolio != 0 else 0
+                    
+                    downside_returns = ret_cartera_diario[ret_cartera_diario < 0]
+                    downside_vol = downside_returns.std() * np.sqrt(252)
+                    sortino = (port_ret_annual - rf_total) / downside_vol if downside_vol > 0 else 0
+                else:
+                    port_vol_annual = sharpe = treynor = sortino = var_95_mxn = var_95_pct = 0
+                
                 # --- DASHBOARD VISUAL ---
-                st.markdown("### Resumen de Saldos")
+                st.markdown("### Resumen de Cuenta")
                 col_s1, col_s2, col_s3 = st.columns(3)
-                col_s1.metric("Saldo Inicial (Invertido)", f"${saldo_inicial_total:,.2f}")
-                col_s2.metric("Saldo Actual (Valuacion)", f"${saldo_actual_total:,.2f}", f"{rendimiento_global_pct:.2%} Global")
+                col_s1.metric("Capital Invertido", f"${saldo_inicial_total:,.2f}")
+                col_s2.metric("Valuacion de Mercado", f"${saldo_actual_total:,.2f}", f"{rendimiento_global_pct:.2%} Global")
                 col_s3.metric("Ganancia / Perdida", f"${(saldo_actual_total - saldo_inicial_total):,.2f}")
                 
-                st.markdown("### Metricas de Riesgo del Portafolio (Ponderadas)")
-                col_r1, col_r2, col_r3 = st.columns(3)
-                col_r1.metric("Beta Ponderada", f"{beta_portafolio:.2f}")
-                col_r2.metric("CAPM Esperado", f"{capm_portafolio:.2%}")
-                col_r3.metric("Tasa de Referencia (Rf)", f"{rf_total:.2%}")
+                st.markdown("### Metricas Fundamentales (Ponderadas)")
+                col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+                col_r1.metric("Beta del Portafolio", f"{beta_portafolio:.2f}")
+                col_r2.metric("CAPM (Retorno Esperado)", f"{capm_portafolio:.2%}")
+                col_r3.metric("Volatilidad Anual", f"{port_vol_annual:.2%}")
+                col_r4.metric("Tasa Libre Riesgo (Rf)", f"{rf_total:.2%}")
+                
+                st.markdown("### Indices de Calidad & VaR (Analisis Cuantitativo)")
+                col_i1, col_i2, col_i3, col_i4 = st.columns(4)
+                col_i1.metric("Sharpe Ratio", f"{sharpe:.2f}")
+                col_i2.metric("Treynor Ratio", f"{treynor:.4f}")
+                col_i3.metric("Sortino Ratio", f"{sortino:.2f}")
+                col_i4.metric("VaR 95% (Exposicion 1A)", f"-${var_95_mxn:,.2f}")
                 
                 st.markdown("---")
                 col_grafica, col_tabla = st.columns([1, 1.5])
@@ -294,9 +308,9 @@ elif menu == "Analisis de Portafolio Completo":
                 
                 with col_tabla:
                     st.markdown("#### Desglose de Activos")
-                    # Formatear columnas monetarias para visualizacion
                     df_visual = df_resumen.copy()
-                    df_visual["Saldo Inicial"] = df_visual["Saldo Inicial"].apply(lambda x: f"${x:,.2f}")
+                    df_visual["Precio Compra"] = df_visual["Precio Compra"].apply(lambda x: f"${x:,.2f}")
+                    df_visual["Precio Actual"] = df_visual["Precio Actual"].apply(lambda x: f"${x:,.2f}")
                     df_visual["Saldo Actual"] = df_visual["Saldo Actual"].apply(lambda x: f"${x:,.2f}")
                     df_visual["Rendimiento"] = df_visual["Rendimiento"].apply(lambda x: f"{x:.2%}")
                     df_visual["Peso %"] = df_visual["Peso %"].apply(lambda x: f"{x:.2%}")
