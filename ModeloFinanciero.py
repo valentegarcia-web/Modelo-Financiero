@@ -5,15 +5,12 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy.optimize import minimize
-import pandas_ta as ta
-import statsmodels.api as sm
 
 # ==========================================
 # 1. CONFIGURACION Y UX (BLOOMBERG STYLE)
 # ==========================================
 st.set_page_config(page_title="QUANT TERMINAL MX", layout="wide", initial_sidebar_state="expanded")
 
-# CSS para Terminal Bloomberg (Negro, Verde Neon y Ambar)
 st.markdown("""
     <style>
     .stApp { background-color: #000000; color: #00FF00; font-family: 'Courier New', Courier, monospace; }
@@ -31,7 +28,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. MOTOR DE DATOS LOCAL (BMV / BIVA)
+# 2. MOTOR DE DATOS LOCAL
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y"):
@@ -58,15 +55,31 @@ def fetch_market_data(tickers, period="5y"):
     return prices, low_liquidity
 
 # ==========================================
-# 3. CORE ANALITICO & QUANTS
+# 3. CORE ANALITICO PURE PYTHON (SIN DEPENDENCIAS EXTERNAS)
 # ==========================================
-def calc_beta_alpha(stock_returns, market_returns, rf_daily):
-    y = stock_returns - rf_daily
-    x = market_returns - rf_daily
-    x = sm.add_constant(x)
-    model = sm.OLS(y, x, missing='drop').fit()
-    alpha, beta = model.params.iloc[0], model.params.iloc[1]
-    return beta, alpha * 252
+def calc_beta_alpha_pure(stock_returns, market_returns, rf_daily):
+    # Alineacion de datos y eliminacion de nulos
+    df = pd.concat([stock_returns, market_returns], axis=1).dropna()
+    if df.empty or len(df) < 2: return 0, 0
+    
+    y = df.iloc[:, 0] - rf_daily
+    x = df.iloc[:, 1] - rf_daily
+    
+    # Matriz de covarianza
+    cov_matrix = np.cov(y, x)
+    beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+    
+    # Interseccion (Alfa diaria)
+    alpha_daily = y.mean() - beta * x.mean()
+    return beta, alpha_daily * 252
+
+def calc_bbands_pure(df, window=20, num_std=2):
+    # Calculo nativo de Bollinger Bands
+    df['SMA'] = df['Close'].rolling(window=window).mean()
+    df['STD'] = df['Close'].rolling(window=window).std()
+    df['BBU'] = df['SMA'] + (df['STD'] * num_std)
+    df['BBL'] = df['SMA'] - (df['STD'] * num_std)
+    return df
 
 def calc_altman_z(ticker_obj):
     try:
@@ -171,10 +184,10 @@ elif menu == "[EQUITY]":
                     st.warning(f"ADVERTENCIA: {t_str} presenta bajo volumen de operacion.")
                 
                 ret = np.log(prices / prices.shift(1)).dropna()
-                beta, alpha = calc_beta_alpha(ret[t_str], ret["^MXX"], rf_daily)
+                beta, alpha = calc_beta_alpha_pure(ret[t_str], ret["^MXX"], rf_daily)
                 
                 df_ta = yf.download(t_str, period="1y", progress=False)
-                df_ta.ta.bbands(append=True)
+                df_ta = calc_bbands_pure(df_ta)
                 
                 st.markdown("### FUNDAMENTALS & QUANTS")
                 c1, c2, c3, c4 = st.columns(4)
@@ -189,12 +202,10 @@ elif menu == "[EQUITY]":
                 c4.metric("Altman Z-Score", z_display)
                 
                 st.markdown("### TECHNICAL ANALYSIS (BBANDS)")
-                bb_upper = [col for col in df_ta.columns if col.startswith('BBU')][0]
-                bb_lower = [col for col in df_ta.columns if col.startswith('BBL')][0]
                 
                 fig = go.Figure(data=[go.Candlestick(x=df_ta.index, open=df_ta['Open'], high=df_ta['High'], low=df_ta['Low'], close=df_ta['Close'], name="Precio")])
-                fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta[bb_upper], line=dict(color='rgba(255,191,0,0.5)', dash='dash'), name="BB Upper"))
-                fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta[bb_lower], line=dict(color='rgba(255,191,0,0.5)', dash='dash'), name="BB Lower"))
+                fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta['BBU'], line=dict(color='rgba(255,191,0,0.5)', dash='dash'), name="BB Upper"))
+                fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta['BBL'], line=dict(color='rgba(255,191,0,0.5)', dash='dash'), name="BB Lower"))
                 fig.update_layout(plot_bgcolor='#000000', paper_bgcolor='#000000', font_color='#00FF00', xaxis_rangeslider_visible=False)
                 fig.update_xaxes(showgrid=True, gridcolor='#333')
                 fig.update_yaxes(showgrid=True, gridcolor='#333')
@@ -284,7 +295,7 @@ elif menu == "[PORTFOLIO]":
                 
                 diag_data = []
                 for t in assets.columns:
-                    b, a = calc_beta_alpha(ret[t], ret_market, rf_daily)
+                    b, a = calc_beta_alpha_pure(ret[t], ret_market, rf_daily)
                     action = "MANTENER" if a > 0 else "SWITCH"
                     diag_data.append({"Activo": t, "Beta": round(b, 2), "Alfa Anual": f"{a:.2%}", "Recomendacion": action})
                 
@@ -296,7 +307,7 @@ elif menu == "[HELP/EDU]":
     st.markdown("""
     * **Filosofia de Riesgo:** Base matematica en evaluacion de proyectos (Sapag Chain) y riesgo de simulacion (Velez Pareja).
     * **Beta:** Sensibilidad del activo frente al S&P/BMV IPC.
-    * **Alfa de Jensen:** Exceso de retorno ajustado por riesgo sistémico.
+    * **Alfa de Jensen:** Exceso de retorno ajustado por riesgo sistemico.
     * **Altman Z-Score:** Probabilidad estadistica de quiebra.
     * **VaR Monte Carlo:** Maxima perdida esperada con un 95% de confianza.
     """)
