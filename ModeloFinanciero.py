@@ -42,33 +42,37 @@ st.markdown(f"""
     div[data-testid="stMetricLabel"] {{ color: #A0A0A0 !important; font-size: 0.9rem !important; text-transform: uppercase; letter-spacing: 1px; }}
     
     .stDataFrame {{ background-color: {COLOR_PANEL}; border-radius: 8px; }}
+    
+    /* Estilo para el panel de Insights */
+    .insight-box {{
+        background-color: rgba(0, 164, 166, 0.1);
+        border-left: 5px solid {COLOR_ACENTO};
+        padding: 20px;
+        border-radius: 5px;
+        margin-bottom: 20px;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SISTEMA DE MEMORIA (STATE MANAGEMENT)
+# 2. SISTEMA DE MEMORIA
 # ==========================================
 if 'cartera' not in st.session_state:
     st.session_state['cartera'] = []  
 
 # ==========================================
-# 3. MOTORES ANALITICOS Y DE DATOS
+# 3. MOTORES ANALITICOS
 # ==========================================
 @st.cache_data(ttl=300) 
 def fetch_market_data(tickers_list, period="5y"):
     if not tickers_list: return None
-    
-    if "^MXX" not in tickers_list:
-        tickers_list.append("^MXX")
+    if "^MXX" not in tickers_list: tickers_list.append("^MXX")
         
     data = yf.download(tickers_list, period=period, progress=False)
     if data.empty: return None
         
     prices = data['Adj Close'] if 'Adj Close' in data else data['Close']
-    
-    if isinstance(prices, pd.Series):
-        prices = prices.to_frame(name=tickers_list[0])
-        
+    if isinstance(prices, pd.Series): prices = prices.to_frame(name=tickers_list[0])
     prices = prices.ffill().bfill()
     return prices
 
@@ -94,12 +98,7 @@ def calc_bbands_pure(df, window=20, num_std=2):
 # ==========================================
 st.sidebar.markdown(f"<h3 style='color: {COLOR_ACENTO};'>CONFIDELIS ANALYTICS</h3>", unsafe_allow_html=True)
 st.sidebar.markdown("---")
-
-menu = st.sidebar.radio("Navegacion Principal:", [
-    "Analisis Individual de Acciones", 
-    "Analisis de Portafolio Completo"
-])
-
+menu = st.sidebar.radio("Navegacion Principal:", ["Analisis Individual de Acciones", "Analisis de Portafolio Completo"])
 st.sidebar.markdown("---")
 st.sidebar.markdown("#### Parametros Macro (Mexico)")
 rf_input = st.sidebar.number_input("Tasa Libre de Riesgo (CETES) %", value=11.00, step=0.1) / 100
@@ -112,12 +111,9 @@ rf_daily = rf_total / 252
 # ==========================================
 if menu == "Analisis Individual de Acciones":
     st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Analisis Individual (Equity)</h2>", unsafe_allow_html=True)
-    st.markdown("Busque un activo especifico para evaluar su rendimiento historico y metricas de riesgo antes de agregarlo a su portafolio.")
-    
     with st.form("eq_form"):
         col_t, col_b = st.columns([3, 1])
-        with col_t:
-            ticker_ind = st.text_input("Ingrese el Ticker de la BMV (ej. WALMEX, ALFAA):", "WALMEX")
+        with col_t: ticker_ind = st.text_input("Ingrese el Ticker de la BMV (ej. WALMEX, ALFAA):", "WALMEX")
         with col_b:
             st.markdown("<br>", unsafe_allow_html=True)
             run_des = st.form_submit_button("Analizar Activo")
@@ -126,7 +122,6 @@ if menu == "Analisis Individual de Acciones":
         t_str = ticker_ind.strip().upper() + ".MX" if not ticker_ind.strip().upper().endswith(".MX") else ticker_ind.strip().upper()
         with st.spinner(f"Descargando datos del mercado para {t_str}..."):
             prices = fetch_market_data([t_str], "3y")
-            
             if prices is not None and t_str in prices.columns:
                 ret = np.log(prices / prices.shift(1)).dropna()
                 beta, alpha = calc_beta_alpha_pure(ret[t_str], ret["^MXX"], rf_daily)
@@ -144,7 +139,6 @@ if menu == "Analisis Individual de Acciones":
                 if isinstance(df_ta, pd.Series): df_ta = df_ta.to_frame()
                 df_ta = calc_bbands_pure(df_ta)
                 
-                st.markdown("### Comportamiento Tecnico (1 Ano)")
                 fig = go.Figure(data=[go.Candlestick(x=df_ta.index, open=df_ta['Open'], high=df_ta['High'], low=df_ta['Low'], close=df_ta['Close'], name="Precio")])
                 fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta['BBU'], line=dict(color='rgba(0,164,166,0.6)', dash='dash'), name="Banda Superior"))
                 fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta['BBL'], line=dict(color='rgba(0,164,166,0.6)', dash='dash'), name="Banda Inferior"))
@@ -152,8 +146,7 @@ if menu == "Analisis Individual de Acciones":
                 fig.update_xaxes(showgrid=True, gridcolor='#2A2D35')
                 fig.update_yaxes(showgrid=True, gridcolor='#2A2D35')
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.error("No se encontraron datos. Verifique el nombre del Ticker.")
+            else: st.error("No se encontraron datos.")
 
 # ==========================================
 # 6. MODULO 2: GESTION DE PORTAFOLIO COMPLETO
@@ -161,26 +154,19 @@ if menu == "Analisis Individual de Acciones":
 elif menu == "Analisis de Portafolio Completo":
     st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Consolidado de Portafolio y Riesgos</h2>", unsafe_allow_html=True)
     
-    with st.expander("AGREGAR ACTIVOS AL PORTAFOLIO", expanded=True):
+    with st.expander("➕ AGREGAR ACTIVOS AL PORTAFOLIO", expanded=True):
         with st.form("add_asset_form"):
             c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-            with c1:
-                nuevo_ticker = st.text_input("Ticker (ej. BIMBOA)")
-            with c2:
-                nuevas_acciones = st.number_input("Cant. Acciones", min_value=1.0, step=1.0)
-            with c3:
-                nuevo_precio = st.number_input("Precio de Compra ($)", min_value=0.01, step=1.0)
+            with c1: nuevo_ticker = st.text_input("Ticker (ej. BIMBOA)")
+            with c2: nuevas_acciones = st.number_input("Cant. Acciones", min_value=1.0, step=1.0)
+            with c3: nuevo_precio = st.number_input("Precio de Compra ($)", min_value=0.01, step=1.0)
             with c4:
                 st.markdown("<br>", unsafe_allow_html=True)
                 btn_agregar = st.form_submit_button("Agregar Activo")
                 
             if btn_agregar and nuevo_ticker:
                 t_str = nuevo_ticker.strip().upper() + ".MX" if not nuevo_ticker.strip().upper().endswith(".MX") else nuevo_ticker.strip().upper()
-                st.session_state['cartera'].append({
-                    "Ticker": t_str,
-                    "Acciones": nuevas_acciones,
-                    "Precio_Compra": nuevo_precio
-                })
+                st.session_state['cartera'].append({"Ticker": t_str, "Acciones": nuevas_acciones, "Precio_Compra": nuevo_precio})
                 st.rerun()
 
     if len(st.session_state['cartera']) > 0:
@@ -202,7 +188,6 @@ elif menu == "Analisis de Portafolio Completo":
                 
                 saldo_inicial_total = 0
                 saldo_actual_total = 0
-                
                 filas_tabla = []
                 betas_dict = {}
                 capm_dict = {}
@@ -224,7 +209,6 @@ elif menu == "Analisis de Portafolio Completo":
                     saldo_actual_total += s_actual
                     
                     rend_pct = (s_actual / s_inicial) - 1
-                    
                     beta, alpha = calc_beta_alpha_pure(retornos[t], ret_mercado, rf_daily) if t in retornos.columns else (0, 0)
                     capm = rf_total + beta * (rend_mercado_anual - rf_total)
                     
@@ -232,91 +216,117 @@ elif menu == "Analisis de Portafolio Completo":
                     capm_dict[t] = capm
                     
                     filas_tabla.append({
-                        "Activo": t,
-                        "Acciones": acciones,
-                        "Precio Compra": p_compra,
-                        "Precio Actual": p_actual,
-                        "Saldo Inicial": s_inicial,
-                        "Saldo Actual": s_actual,
-                        "Rendimiento": rend_pct,
-                        "Beta": beta
+                        "Activo": t, "Acciones": acciones, "Precio Compra": p_compra, "Precio Actual": p_actual,
+                        "Saldo Inicial": s_inicial, "Saldo Actual": s_actual, "Rendimiento": rend_pct,
+                        "Beta": beta, "Alfa": alpha
                     })
                 
                 df_resumen = pd.DataFrame(filas_tabla)
                 df_resumen["Peso %"] = df_resumen["Saldo Actual"] / saldo_actual_total
                 
-                # --- MATEMATICAS AVANZADAS DEL PORTAFOLIO ---
-                # 1. Beta y CAPM Ponderados
+                # --- MATEMATICAS AVANZADAS ---
                 beta_portafolio = sum(df_resumen["Peso %"] * df_resumen["Beta"])
                 capm_portafolio = sum(df_resumen["Peso %"] * df_resumen["Activo"].map(capm_dict))
                 rendimiento_global_pct = (saldo_actual_total / saldo_inicial_total) - 1
                 
-                # 2. Retornos historicos diarios de TODO el portafolio (ponderados)
                 activos_validos = [t for t in df_resumen["Activo"].tolist() if t in retornos.columns]
                 pesos_validos = df_resumen.set_index("Activo").loc[activos_validos, "Peso %"].values
                 
                 if len(activos_validos) > 0:
                     ret_cartera_diario = (retornos[activos_validos] * pesos_validos).sum(axis=1)
-                    
-                    # Volatilidad y Retorno Anualizado del Portafolio
                     port_vol_annual = ret_cartera_diario.std() * np.sqrt(252)
                     port_ret_annual = ret_cartera_diario.mean() * 252
-                    
-                    # 3. Value at Risk (VaR) Parametrico al 95% (Z = 1.645)
-                    var_95_pct = 1.645 * port_vol_annual
-                    var_95_mxn = saldo_actual_total * var_95_pct
-                    
-                    # 4. Indices de Calidad
+                    var_95_mxn = saldo_actual_total * (1.645 * port_vol_annual)
                     sharpe = (port_ret_annual - rf_total) / port_vol_annual if port_vol_annual > 0 else 0
-                    treynor = (port_ret_annual - rf_total) / beta_portafolio if beta_portafolio != 0 else 0
-                    
-                    downside_returns = ret_cartera_diario[ret_cartera_diario < 0]
-                    downside_vol = downside_returns.std() * np.sqrt(252)
-                    sortino = (port_ret_annual - rf_total) / downside_vol if downside_vol > 0 else 0
                 else:
-                    port_vol_annual = sharpe = treynor = sortino = var_95_mxn = var_95_pct = 0
+                    port_vol_annual = sharpe = var_95_mxn = 0
+
+                # -----------------------------------------------------------
+                # EL CEREBRO ANALITICO: RESUMEN INTELIGENTE
+                # -----------------------------------------------------------
+                st.markdown("---")
+                st.markdown("### 🤖 Diagnostico Automático del Portafolio")
+                
+                # Encontrar estrellas y rezagados
+                mejor_activo = df_resumen.loc[df_resumen['Rendimiento'].idxmax()]
+                peor_activo = df_resumen.loc[df_resumen['Rendimiento'].idxmin()]
+                mas_riesgoso = df_resumen.loc[df_resumen['Beta'].idxmax()]
+                activos_toxicos = df_resumen[(df_resumen['Alfa'] < 0) & (df_resumen['Beta'] > 1)]
+                
+                mensaje_diagnostico = f"**Estado General:** Su portafolio tiene un rendimiento global de **{rendimiento_global_pct:.2%}** y una volatilidad anual estimada del **{port_vol_annual:.2%}**.<br><br>"
+                mensaje_diagnostico += f"🚀 **El Motor del Portafolio:** **{mejor_activo['Activo']}** es su mejor activo con una ganancia de **{mejor_activo['Rendimiento']:.2%}**.<br>"
+                mensaje_diagnostico += f"⚠️ **Alerta de Riesgo:** **{mas_riesgoso['Activo']}** es el activo más agresivo de su cartera (Beta: {mas_riesgoso['Beta']:.2f}). Sus fluctuaciones impactarán fuertemente su saldo.<br>"
+                
+                if not activos_toxicos.empty:
+                    toxicos_str = ", ".join(activos_toxicos['Activo'].tolist())
+                    mensaje_diagnostico += f"<br>🔴 **RECOMENDACION DE SWITCH:** Se detectó que **{toxicos_str}** tienen un *Alfa negativo* a pesar de su alto riesgo. Le sugerimos evaluar la venta de estas posiciones y rotar el capital hacia activos con mejor perfil."
+                else:
+                    mensaje_diagnostico += "<br>🟢 **Salud Optimista:** Ningún activo de alto riesgo está destruyendo valor (Alfa positivo en activos volátiles). Mantenga su estrategia actual."
+
+                st.markdown(f"<div class='insight-box'>{mensaje_diagnostico}</div>", unsafe_allow_html=True)
                 
                 # --- DASHBOARD VISUAL ---
                 st.markdown("### Resumen de Cuenta")
-                col_s1, col_s2, col_s3 = st.columns(3)
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
                 col_s1.metric("Capital Invertido", f"${saldo_inicial_total:,.2f}")
                 col_s2.metric("Valuacion de Mercado", f"${saldo_actual_total:,.2f}", f"{rendimiento_global_pct:.2%} Global")
                 col_s3.metric("Ganancia / Perdida", f"${(saldo_actual_total - saldo_inicial_total):,.2f}")
-                
-                st.markdown("### Metricas Fundamentales (Ponderadas)")
-                col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-                col_r1.metric("Beta del Portafolio", f"{beta_portafolio:.2f}")
-                col_r2.metric("CAPM (Retorno Esperado)", f"{capm_portafolio:.2%}")
-                col_r3.metric("Volatilidad Anual", f"{port_vol_annual:.2%}")
-                col_r4.metric("Tasa Libre Riesgo (Rf)", f"{rf_total:.2%}")
-                
-                st.markdown("### Indices de Calidad & VaR (Analisis Cuantitativo)")
-                col_i1, col_i2, col_i3, col_i4 = st.columns(4)
-                col_i1.metric("Sharpe Ratio", f"{sharpe:.2f}")
-                col_i2.metric("Treynor Ratio", f"{treynor:.4f}")
-                col_i3.metric("Sortino Ratio", f"{sortino:.2f}")
-                col_i4.metric("VaR 95% (Exposicion 1A)", f"-${var_95_mxn:,.2f}")
-                
+                col_s4.metric("VaR 95% (Riesgo de Caida)", f"-${var_95_mxn:,.2f}")
+
+                # --- SECCION DE GRAFICOS AVANZADOS ---
                 st.markdown("---")
-                col_grafica, col_tabla = st.columns([1, 1.5])
+                st.markdown("### Análisis Gráfico")
                 
-                with col_grafica:
-                    st.markdown("#### Composicion del Portafolio")
+                tab1, tab2, tab3 = st.tabs(["📉 Backtest Histórico", "🎯 Riesgo vs Retorno", "🍩 Composición Ponderada"])
+                
+                with tab1:
+                    # Grafica de retornos acumulados vs IPC
+                    if len(activos_validos) > 0:
+                        cum_ret_port = (1 + ret_cartera_diario).cumprod()
+                        cum_ret_bench = (1 + ret_mercado).cumprod()
+                        
+                        fig_line = go.Figure()
+                        fig_line.add_trace(go.Scatter(x=cum_ret_port.index, y=cum_ret_port, name="Su Portafolio", line=dict(color=COLOR_ACENTO, width=3)))
+                        fig_line.add_trace(go.Scatter(x=cum_ret_bench.index, y=cum_ret_bench, name="S&P/BMV IPC", line=dict(color="#888888", width=2, dash='dot')))
+                        fig_line.update_layout(title="Crecimiento de $1 invertido (Portafolio vs Mercado)", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO, yaxis_title="Multiplicador de Capital", xaxis_title="Fecha")
+                        fig_line.update_xaxes(showgrid=True, gridcolor='#2A2D35')
+                        fig_line.update_yaxes(showgrid=True, gridcolor='#2A2D35')
+                        st.plotly_chart(fig_line, use_container_width=True)
+                
+                with tab2:
+                    # Scatter Plot de Riesgo (Beta) vs Retorno (Rendimiento)
+                    fig_scatter = px.scatter(
+                        df_resumen, x="Beta", y="Rendimiento", size="Saldo Actual", color="Activo", 
+                        hover_name="Activo", text="Activo", title="Mapa de Riesgo y Eficiencia"
+                    )
+                    fig_scatter.update_traces(textposition='top center', marker=dict(opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
+                    fig_scatter.add_vline(x=1.0, line_width=2, line_dash="dash", line_color="red", annotation_text="Mercado Neutral")
+                    fig_scatter.add_hline(y=0.0, line_width=2, line_dash="dash", line_color="gray")
+                    fig_scatter.update_layout(plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO, xaxis_title="Riesgo (Beta)", yaxis_title="Rendimiento Real (%)")
+                    fig_scatter.update_xaxes(showgrid=True, gridcolor='#2A2D35')
+                    fig_scatter.update_yaxes(showgrid=True, gridcolor='#2A2D35', tickformat='.1%')
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+                    st.caption("Interpretación: Busque tener sus burbujas más grandes (mayor capital) en la zona superior izquierda (Alto rendimiento, Bajo riesgo). Burbujas en la zona inferior derecha son activos tóxicos.")
+
+                with tab3:
+                    # Grafica de Pastel
                     fig_pie = px.pie(df_resumen, values='Saldo Actual', names='Activo', hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
-                    fig_pie.update_layout(plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO, margin=dict(t=0, b=0, l=0, r=0))
+                    fig_pie.update_layout(plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
                     st.plotly_chart(fig_pie, use_container_width=True)
                 
-                with col_tabla:
-                    st.markdown("#### Desglose de Activos")
-                    df_visual = df_resumen.copy()
-                    df_visual["Precio Compra"] = df_visual["Precio Compra"].apply(lambda x: f"${x:,.2f}")
-                    df_visual["Precio Actual"] = df_visual["Precio Actual"].apply(lambda x: f"${x:,.2f}")
-                    df_visual["Saldo Actual"] = df_visual["Saldo Actual"].apply(lambda x: f"${x:,.2f}")
-                    df_visual["Rendimiento"] = df_visual["Rendimiento"].apply(lambda x: f"{x:.2%}")
-                    df_visual["Peso %"] = df_visual["Peso %"].apply(lambda x: f"{x:.2%}")
-                    df_visual["Beta"] = df_visual["Beta"].apply(lambda x: f"{x:.2f}")
-                    
-                    st.dataframe(df_visual[["Activo", "Acciones", "Precio Compra", "Precio Actual", "Saldo Actual", "Rendimiento", "Peso %"]], use_container_width=True)
+                # --- TABLA DE DATOS ---
+                st.markdown("---")
+                st.markdown("#### Desglose de Operaciones")
+                df_visual = df_resumen.copy()
+                df_visual["Precio Compra"] = df_visual["Precio Compra"].apply(lambda x: f"${x:,.2f}")
+                df_visual["Precio Actual"] = df_visual["Precio Actual"].apply(lambda x: f"${x:,.2f}")
+                df_visual["Saldo Actual"] = df_visual["Saldo Actual"].apply(lambda x: f"${x:,.2f}")
+                df_visual["Rendimiento"] = df_visual["Rendimiento"].apply(lambda x: f"{x:.2%}")
+                df_visual["Peso %"] = df_visual["Peso %"].apply(lambda x: f"{x:.2%}")
+                df_visual["Beta"] = df_visual["Beta"].apply(lambda x: f"{x:.2f}")
+                df_visual["Alfa"] = df_visual["Alfa"].apply(lambda x: f"{x:.2%}")
+                
+                st.dataframe(df_visual[["Activo", "Acciones", "Precio Compra", "Precio Actual", "Saldo Actual", "Rendimiento", "Peso %", "Beta", "Alfa"]], use_container_width=True)
             
             else:
                 st.error("Ocurrio un error al descargar los precios. Verifique los tickers.")
