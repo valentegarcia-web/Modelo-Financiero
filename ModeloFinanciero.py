@@ -4,11 +4,24 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import statsmodels.api as sm
+from scipy.optimize import minimize
+from scipy.stats import t, skew, kurtosis, norm
+from sklearn.covariance import LedoitWolf
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.mixture import GaussianMixture
+from sklearn.linear_model import Ridge
+
+# 4. WARNINGS — MANEJO SELECTIVO
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn')
+warnings.filterwarnings('ignore', category=FutureWarning, module='statsmodels')
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
 
 # ==========================================
-# 1. CONFIGURACION Y UX (MODERN DARK CORPORATIVO)
+# 1. CONFIGURACION Y UX
 # ==========================================
-st.set_page_config(page_title="CONFIDELIS - Wealth Analytics", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="CONFIDELIS - Production Engine", layout="wide", initial_sidebar_state="expanded")
 
 COLOR_FONDO = "#0E1117"
 COLOR_PANEL = "#1A1C23"
@@ -21,312 +34,668 @@ st.markdown(f"""
     h1, h2, h3, h4, h5, h6, p, span, label {{ color: {COLOR_TEXTO} !important; }}
     .stSidebar {{ background-color: {COLOR_PANEL} !important; border-right: 1px solid #2A2D35; }}
     hr {{ border-color: #2A2D35; }}
-    
     .stTextInput>div>div>input, .stNumberInput>div>div>input {{ background-color: {COLOR_FONDO} !important; color: #FFF !important; border: 1px solid #2A2D35 !important; border-radius: 4px; }}
-    
-    .stButton>button, [data-testid="baseButton-secondaryFormSubmit"] {{ 
-        background-color: {COLOR_ACENTO} !important; 
-        color: #FFFFFF !important; 
-        border: none !important; 
-        border-radius: 6px !important; 
-        font-weight: 600; 
-        width: 100%; 
-        transition: 0.3s;
-    }}
-    .stButton>button:hover, [data-testid="baseButton-secondaryFormSubmit"]:hover {{ 
-        background-color: #008C8D !important; 
-    }}
-    
+    .stButton>button {{ background-color: {COLOR_ACENTO} !important; color: #FFFFFF !important; border: none !important; border-radius: 6px !important; font-weight: 600; width: 100%; transition: 0.3s; }}
+    .stButton>button:hover {{ background-color: #008C8D !important; }}
     div[data-testid="metric-container"] {{ background-color: {COLOR_PANEL}; border: 1px solid #2A2D35; padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-    div[data-testid="stMetricValue"] {{ color: {COLOR_ACENTO} !important; font-size: 1.8rem !important; font-weight: bold; }}
-    div[data-testid="stMetricLabel"] {{ color: #A0A0A0 !important; font-size: 0.9rem !important; text-transform: uppercase; letter-spacing: 1px; }}
-    
-    .stDataFrame {{ background-color: {COLOR_PANEL}; border-radius: 8px; }}
-    
-    /* Estilo para el panel de Insights */
-    .insight-box {{
-        background-color: rgba(0, 164, 166, 0.1);
-        border-left: 5px solid {COLOR_ACENTO};
-        padding: 20px;
-        border-radius: 5px;
-        margin-bottom: 20px;
-    }}
+    div[data-testid="stMetricValue"] {{ color: {COLOR_ACENTO} !important; font-size: 1.5rem !important; font-weight: bold; }}
+    .insight-box {{ background-color: rgba(0, 164, 166, 0.1); border-left: 5px solid {COLOR_ACENTO}; padding: 20px; border-radius: 5px; margin-bottom: 20px; }}
+    .alert-box {{ background-color: rgba(220, 53, 69, 0.1); border-left: 5px solid #DC3545; padding: 20px; border-radius: 5px; margin-bottom: 20px; }}
+    .badge-success {{ background-color: #28a745; color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; }}
+    .badge-warning {{ background-color: #ffc107; color: black; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; }}
     </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. SISTEMA DE MEMORIA
-# ==========================================
-if 'cartera' not in st.session_state:
-    st.session_state['cartera'] = []  
+if 'cartera' not in st.session_state: st.session_state['cartera'] = []  
+if 'meta_model' not in st.session_state: st.session_state['meta_model'] = None
 
 # ==========================================
-# 3. MOTORES ANALITICOS
+# 2. DATA ENGINE
 # ==========================================
-@st.cache_data(ttl=300) 
-def fetch_market_data(tickers_list, period="5y"):
-    if not tickers_list: return None
-    if "^MXX" not in tickers_list: tickers_list.append("^MXX")
-        
-    data = yf.download(tickers_list, period=period, progress=False)
-    if data.empty: return None
-        
+def fetch_market_data(tickers_list, period="5y", use_cache=True):
+    """use_cache=True para backtesting, use_cache=False para ejecución live T+1"""
+    if not tickers_list: return None, None
+    tickers = tickers_list.copy()
+    if "^MXX" not in tickers: tickers.append("^MXX")
+    data = yf.download(tickers, period=period, progress=False)
+    if data.empty: return None, None
     prices = data['Adj Close'] if 'Adj Close' in data else data['Close']
-    if isinstance(prices, pd.Series): prices = prices.to_frame(name=tickers_list[0])
-    prices = prices.ffill().bfill()
-    return prices
+    volumes = data['Volume'] if 'Volume' in data else pd.DataFrame(1e6, index=prices.index, columns=prices.columns)
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame(name=tickers[0])
+        volumes = volumes.to_frame(name=tickers[0])
+    return prices.ffill().bfill(), volumes.ffill().bfill()
 
-def calc_beta_alpha_pure(stock_returns, market_returns, rf_daily):
-    df = pd.concat([stock_returns, market_returns], axis=1).dropna()
-    if df.empty or len(df) < 2: return 0, 0
-    y = df.iloc[:, 0] - rf_daily
-    x = df.iloc[:, 1] - rf_daily
-    cov_matrix = np.cov(y, x)
-    beta = cov_matrix[0, 1] / cov_matrix[1, 1]
-    alpha_daily = y.mean() - beta * x.mean()
-    return beta, alpha_daily * 252
+# Wrapper con caché para backtesting
+@st.cache_data(ttl=3600)
+def fetch_market_data_cached(tickers_list, period="5y"):
+    return fetch_market_data(tickers_list, period, use_cache=True)
 
-def calc_bbands_pure(df, window=20, num_std=2):
-    df['SMA'] = df['Close'].rolling(window=window).mean()
-    df['STD'] = df['Close'].rolling(window=window).std()
-    df['BBU'] = df['SMA'] + (df['STD'] * num_std)
-    df['BBL'] = df['SMA'] - (df['STD'] * num_std)
-    return df
+def calcular_retornos_robustos(prices):
+    returns = prices.pct_change().dropna()
+    lower = returns.expanding(min_periods=30).quantile(0.01)
+    lower = lower.combine_first(returns.rolling(252, min_periods=30).quantile(0.01))
+    upper = returns.expanding(min_periods=30).quantile(0.99)
+    upper = upper.combine_first(returns.rolling(252, min_periods=30).quantile(0.99))
+    return returns.clip(lower=lower, upper=upper).fillna(0)
 
 # ==========================================
-# 4. ENRUTAMIENTO UI (SIDEBAR)
+# 3. FEATURE ENGINEERING & MULTI-FACTOR ALPHA
 # ==========================================
-st.sidebar.markdown(f"<h3 style='color: {COLOR_ACENTO};'>CONFIDELIS ANALYTICS</h3>", unsafe_allow_html=True)
-st.sidebar.markdown("---")
-menu = st.sidebar.radio("Navegacion Principal:", ["Analisis Individual de Acciones", "Analisis de Portafolio Completo"])
-st.sidebar.markdown("---")
-st.sidebar.markdown("#### Parametros Macro (Mexico)")
-rf_input = st.sidebar.number_input("Tasa Libre de Riesgo (CETES) %", value=11.00, step=0.1) / 100
-embi_input = st.sidebar.number_input("Riesgo Pais (EMBI) %", value=3.50, step=0.1) / 100
-rf_total = rf_input + embi_input 
-rf_daily = rf_total / 252
-
-# ==========================================
-# 5. MODULO 1: ANALISIS INDIVIDUAL
-# ==========================================
-if menu == "Analisis Individual de Acciones":
-    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Analisis Individual (Equity)</h2>", unsafe_allow_html=True)
-    with st.form("eq_form"):
-        col_t, col_b = st.columns([3, 1])
-        with col_t: ticker_ind = st.text_input("Ingrese el Ticker de la BMV (ej. WALMEX, ALFAA):", "WALMEX")
-        with col_b:
-            st.markdown("<br>", unsafe_allow_html=True)
-            run_des = st.form_submit_button("Analizar Activo")
-            
-    if run_des:
-        t_str = ticker_ind.strip().upper() + ".MX" if not ticker_ind.strip().upper().endswith(".MX") else ticker_ind.strip().upper()
-        with st.spinner(f"Descargando datos del mercado para {t_str}..."):
-            prices = fetch_market_data([t_str], "3y")
-            if prices is not None and t_str in prices.columns:
-                ret = np.log(prices / prices.shift(1)).dropna()
-                beta, alpha = calc_beta_alpha_pure(ret[t_str], ret["^MXX"], rf_daily)
-                capm_e = rf_total + beta * ((ret["^MXX"].mean()*252) - rf_total)
-                precio_actual = prices[t_str].iloc[-1]
-                
-                st.markdown("### Metricas Clave")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Precio Actual", f"${precio_actual:.2f}")
-                c2.metric("Beta (Riesgo)", f"{beta:.2f}")
-                c3.metric("Alfa (Exceso Retorno)", f"{alpha:.2%}")
-                c4.metric("CAPM (Retorno Esperado)", f"{capm_e:.2%}")
-                
-                df_ta = yf.download(t_str, period="1y", progress=False)
-                if isinstance(df_ta, pd.Series): df_ta = df_ta.to_frame()
-                df_ta = calc_bbands_pure(df_ta)
-                
-                fig = go.Figure(data=[go.Candlestick(x=df_ta.index, open=df_ta['Open'], high=df_ta['High'], low=df_ta['Low'], close=df_ta['Close'], name="Precio")])
-                fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta['BBU'], line=dict(color='rgba(0,164,166,0.6)', dash='dash'), name="Banda Superior"))
-                fig.add_trace(go.Scatter(x=df_ta.index, y=df_ta['BBL'], line=dict(color='rgba(0,164,166,0.6)', dash='dash'), name="Banda Inferior"))
-                fig.update_layout(plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO, xaxis_rangeslider_visible=False, margin=dict(t=30, b=0, l=0, r=0))
-                fig.update_xaxes(showgrid=True, gridcolor='#2A2D35')
-                fig.update_yaxes(showgrid=True, gridcolor='#2A2D35')
-                st.plotly_chart(fig, use_container_width=True)
-            else: st.error("No se encontraron datos.")
-
-# ==========================================
-# 6. MODULO 2: GESTION DE PORTAFOLIO COMPLETO
-# ==========================================
-elif menu == "Analisis de Portafolio Completo":
-    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Consolidado de Portafolio y Riesgos</h2>", unsafe_allow_html=True)
+def generate_multi_factor_alpha(prices_df):
+    if prices_df.empty: return pd.Series(0, index=prices_df.columns)
+    returns = prices_df.pct_change().dropna()
+    volatilities = returns.std() * np.sqrt(252)
     
-    with st.expander("➕ AGREGAR ACTIVOS AL PORTAFOLIO", expanded=True):
+    mom_6m = (prices_df.iloc[-1] / prices_df.iloc[-126]) - 1 if len(prices_df) >= 126 else pd.Series(0, index=prices_df.columns)
+    rank_mom = mom_6m.rank(pct=True) 
+    vol_adj_mom = mom_6m / (volatilities + 1e-6)
+    vol_60 = returns.rolling(60).std().iloc[-1] if len(returns) >= 60 else pd.Series(0.1, index=prices_df.columns)
+    low_vol_factor = -vol_60.rank(pct=True)
+    ma_50 = prices_df.rolling(50).mean().iloc[-1] if len(prices_df) >= 50 else prices_df.iloc[-1]
+    ma_200 = prices_df.rolling(200).mean().iloc[-1] if len(prices_df) >= 200 else prices_df.iloc[-1]
+    trend_factor = ((ma_50 / ma_200) - 1).rank(pct=True)
+    
+    signals = {}
+    for col in prices_df.columns:
+        if col == "^MXX": continue
+        if len(returns[col]) >= 20:
+            roll_mean = returns[col].rolling(20).mean().iloc[-1]
+            roll_std = returns[col].rolling(20).std().iloc[-1]
+            z_score = (returns[col].iloc[-1] - roll_mean) / roll_std if roll_std > 0 else 0
+        else: z_score = 0
+        signals[col] = (0.35 * rank_mom[col]) + (0.25 * vol_adj_mom[col]) + (0.15 * trend_factor[col]) + (0.15 * low_vol_factor[col]) + (0.10 * (-z_score / 3))
+        
+    signals_series = pd.Series(signals)
+    if signals_series.std() > 0: return (signals_series - signals_series.mean()) / signals_series.std()
+    return signals_series - signals_series.mean()
+
+# 6. PERFORMANCE — CACHÉ DEL MODELO ML CON HASH_FUNCS
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False,
+    hash_funcs={pd.DataFrame: lambda df: (df.shape, str(df.index[-1]) if len(df) > 0 else '')}
+)
+def generate_panel_ml_alpha(prices_df, returns_df, volumes_df):
+    panel_data = []
+    cross_sectional_mean = returns_df.mean(axis=1)
+    latest_features_dict = {}
+    
+    for col in prices_df.columns:
+        if col == "^MXX": continue
+        df = pd.DataFrame(index=prices_df.index)
+        df['mom_5'] = prices_df[col].pct_change(5)
+        df['mom_20'] = prices_df[col].pct_change(20)
+        df['mom_60'] = prices_df[col].pct_change(60)
+        df['vol_20'] = returns_df[col].rolling(20).std()
+        df['zscore_20'] = (returns_df[col] - returns_df[col].rolling(20).mean()) / (df['vol_20'] + 1e-6)
+        df['vol_shock'] = volumes_df[col] / (volumes_df[col].rolling(20).mean() + 1e-6)
+        df['dispersion'] = returns_df[col] - cross_sectional_mean
+        df['autocorr_20'] = returns_df[col].rolling(20).apply(lambda x: x.autocorr() if len(x)>2 else 0, raw=False)
+        
+        df['target'] = returns_df[col].shift(-5).rolling(5).sum()
+        df['asset'] = col
+        
+        latest_features_dict[col] = df.drop(columns=['target', 'asset']).iloc[-2]
+        panel_data.append(df)
+        
+    df_all = pd.concat(panel_data)
+    df_train = df_all.dropna(subset=['target']).iloc[:-5] # Embargo
+    
+    if len(df_train) < 100:
+        return pd.Series(0, index=[col for col in prices_df.columns if col != "^MXX"])
+        
+    X_train = df_train.drop(columns=['target', 'asset'])
+    y_train = df_train['target']
+    
+    model = HistGradientBoostingRegressor(max_iter=50, max_depth=3, learning_rate=0.05, l2_regularization=0.1, random_state=42)
+    model.fit(X_train, y_train)
+    
+    X_today = pd.DataFrame(latest_features_dict).T
+    preds = model.predict(X_today)
+    
+    ml_series = pd.Series(preds, index=X_today.index).rank(pct=True)
+    if ml_series.std() > 0: return (ml_series - ml_series.mean()) / ml_series.std()
+    return ml_series - ml_series.mean()
+
+# ==========================================
+# 4. RISK ENGINE & METRICS
+# ==========================================
+def get_ledoit_wolf_cov(returns):
+    lw = LedoitWolf()
+    lw.fit(returns.fillna(0))
+    return lw.covariance_ * 252
+
+def calculate_betas(returns_df, market_returns):
+    X = sm.add_constant(market_returns.values)
+    Y = returns_df.values
+    betas = []
+    for i in range(Y.shape[1]):
+        model = sm.OLS(Y[:, i], X).fit()
+        betas.append(model.params[1])
+    return np.array(betas)
+
+def detect_regime_gmm(market_returns):
+    if len(market_returns) < 126: return "NEUTRAL"
+    df_gmm = pd.DataFrame(index=market_returns.index)
+    df_gmm['ret'] = market_returns.rolling(5).sum()
+    df_gmm['vol'] = market_returns.rolling(20).std() * np.sqrt(252)
+    df_gmm = df_gmm.dropna()
+    if len(df_gmm) < 30: return "NEUTRAL"
+    
+    gmm = GaussianMixture(n_components=2, random_state=42)
+    gmm.fit(df_gmm.iloc[:-1])
+    state = gmm.predict(df_gmm.iloc[-1:])
+    means = gmm.means_
+    safe_state = 0 if means[0, 1] < means[1, 1] else 1
+    return "BULL / STABLE" if state[0] == safe_state else "CRISIS / VOLATILE"
+
+def calcular_drawdown_avanzado(retornos):
+    if len(retornos) == 0: return pd.Series([0]), 0
+    acumulado = (1 + retornos).cumprod()
+    max_acum = acumulado.cummax()
+    drawdown = (acumulado - max_acum) / max_acum
+    return drawdown, drawdown.min()
+
+def probabilistic_sharpe_ratio(port_returns, rf_daily, benchmark_sr=0.0):
+    if len(port_returns) < 30: return 0, 0
+    excess_ret = port_returns - rf_daily
+    if np.isclose(excess_ret.std(), 0): return 0, 0
+    sr_daily = excess_ret.mean() / excess_ret.std()
+    sr_ann = sr_daily * np.sqrt(252)
+    sk = skew(port_returns)
+    kt = kurtosis(port_returns)
+    n = len(port_returns)
+    sr_std = np.sqrt((1 - sk*sr_daily + ((kt-1)/4)*sr_daily**2) / (n-1))
+    psr = norm.cdf((sr_daily - (benchmark_sr/np.sqrt(252))) / sr_std)
+    dsr = sr_ann * (1 - (sk/6)*sr_daily + ((kt-3)/24)*(sr_daily**2))
+    return dsr, psr
+
+# ==========================================
+# 5. ROBUST OPTIMIZATION ENGINE
+# ==========================================
+def optimizar_market_neutral_pro(expected_returns, cov_matrix, current_weights, betas, adv_weights_max, vol_forecast_array, regime):
+    num_assets = len(expected_returns)
+    lambda_reg = 0.05 / num_assets
+    
+    np.random.seed(42)
+    mc_scenarios = np.random.multivariate_normal(np.zeros(num_assets), cov_matrix, 2000)
+    lambda_cvar = 6.0 if regime == "CRISIS / VOLATILE" else 2.0
+    
+    def neg_sharpe(weights):
+        p_ret = np.sum(expected_returns * weights)
+        p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        penalty_l2 = lambda_reg * np.sum(weights**2)
+        
+        delta = np.abs(weights - current_weights)
+        spread_cost = 0.0005 * np.sum(delta)
+        impact_cost = 0.005 * np.sum((delta**1.5) * vol_forecast_array / (adv_weights_max + 1e-6))
+        
+        sim_losses = -(mc_scenarios @ weights)
+        cvar_true = np.mean(np.sort(sim_losses)[-int(0.05 * 2000):])
+        penalty_tail = lambda_cvar * max(cvar_true, 0)
+        
+        if np.isclose(p_vol, 0): return 0
+        return -(p_ret) / p_vol + penalty_l2 + spread_cost + impact_cost + penalty_tail
+
+    bounds = tuple((-mw, mw) for mw in adv_weights_max)
+    constraints = (
+        {'type': 'eq', 'fun': lambda w: np.sum(w)}, 
+        {'type': 'eq', 'fun': lambda w: np.dot(w, betas)}, 
+        {'type': 'ineq', 'fun': lambda w: 1.5 - np.sum(np.abs(w))} 
+    )
+    
+    res = minimize(neg_sharpe, current_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+    
+    # VALIDACIÓN DE DATOS — MANEJO DE ERRORES
+    if not res.success:
+        st.warning(f"⚠️ Optimizador no convergió: {res.message}. Usando pesos actuales.")
+        return current_weights
+    return res.x
+
+# ==========================================
+# 6. WALK-FORWARD BACKTESTING (META-MODEL REAL)
+# ==========================================
+def backtest_walk_forward_meta_model(prices, volumes, activos, rf_daily, initial_capital=1e6):
+    returns = calcular_retornos_robustos(prices)
+    dates = returns.index
+    portfolio_returns = []
+    bench_returns = []
+    idx_out = []
+    
+    current_weights = np.zeros(len(activos))
+    rebalance_freq = 21
+    
+    X_meta = []
+    y_meta = []
+    prev_preds = None
+    meta_model_final = None 
+    
+    for i in range(252, len(dates) - rebalance_freq, rebalance_freq): 
+        start_idx = max(0, i - 504)
+        train_prices = prices.iloc[start_idx:i]
+        train_returns = returns.iloc[start_idx:i]
+        train_volumes = volumes.iloc[start_idx:i]
+        
+        test_returns = returns.iloc[i+1 : i+1+rebalance_freq]
+        if test_returns.empty or len(train_prices) < 126: break
+        
+        # --- 1. RIDGE META-MODEL ZERO-LEAKAGE ---
+        if prev_preds is not None:
+            realized_return = train_returns[activos].iloc[-rebalance_freq:].sum().mean()
+            X_meta.append(prev_preds)
+            y_meta.append(realized_return)
+            
+        c_stat = generate_multi_factor_alpha(train_prices[activos]).fillna(0)
+        c_ml = generate_panel_ml_alpha(train_prices[activos], train_returns[activos], train_volumes[activos]).fillna(0)
+        
+        regime = detect_regime_gmm(train_returns["^MXX"])
+        
+        if len(X_meta) > 5:
+            meta_model = Ridge(alpha=1.0)
+            meta_model.fit(X_meta, y_meta)
+            meta_model_final = meta_model 
+            curr_X = pd.DataFrame({'stat': c_stat.values, 'ml': c_ml.values})
+            meta_alpha = pd.Series(meta_model.predict(curr_X), index=activos)
+        else:
+            w_ml = 0.2 if regime == "CRISIS / VOLATILE" else 0.7
+            meta_alpha = ((1 - w_ml) * c_stat) + (w_ml * c_ml)
+
+        prev_preds = [c_stat.mean(), c_ml.mean()]
+        
+        # --- 2. MATRICES Y OPTIMIZACION ---
+        vol_forecast = train_returns[activos].ewm(span=30).std().iloc[-1] * np.sqrt(252)
+        exp_ret = meta_alpha.values * vol_forecast.values
+        cov = get_ledoit_wolf_cov(train_returns[activos])
+        betas = calculate_betas(train_returns[activos], train_returns["^MXX"])
+        
+        adv_mxn = (train_prices[activos].tail(20) * train_volumes[activos].tail(20)).mean().values
+        adv_weights_max = np.clip((0.10 * adv_mxn) / initial_capital, 0.01, 0.30)
+        
+        raw_weights = optimizar_market_neutral_pro(exp_ret, cov, current_weights, betas, adv_weights_max, vol_forecast.values, regime)
+        
+        current_vol = np.sqrt(np.dot(raw_weights.T, np.dot(cov, raw_weights)))
+        max_dd_running = 0 if len(portfolio_returns) == 0 else calcular_drawdown_avanzado(pd.Series(portfolio_returns))[1]
+        
+        target_vol = 0.05 if (regime == "CRISIS / VOLATILE" or max_dd_running < -0.10) else 0.15
+        new_weights = raw_weights * (target_vol / current_vol) if current_vol > 0 else raw_weights
+            
+        delta = np.abs(new_weights - current_weights)
+        total_cost = (0.0005 * np.sum(delta)) + (0.005 * np.sum((delta**1.5) * vol_forecast.values / (adv_weights_max + 1e-6)))
+        daily_exec_cost = total_cost / 5.0
+        
+        for j in range(len(test_returns)):
+            day_ret = np.dot(new_weights, test_returns[activos].iloc[j].values)
+            if j < 5: day_ret -= daily_exec_cost 
+            portfolio_returns.append(day_ret)
+            bench_returns.append(test_returns["^MXX"].iloc[j])
+            idx_out.append(test_returns.index[j])
+            
+        current_weights = new_weights
+        
+    return pd.Series(portfolio_returns, index=idx_out), meta_model_final, pd.Series(bench_returns, index=idx_out)
+
+def monte_carlo_shuffle_test(returns, n_sim=50):
+    results = []
+    for _ in range(n_sim):
+        shuffled = returns.sample(frac=1, replace=False).reset_index(drop=True)
+        equity = (1 + shuffled).cumprod()
+        results.append(equity.values)
+    return results
+
+# ==========================================
+# UI & DASHBOARD
+# ==========================================
+st.sidebar.markdown(f"<h3 style='color: {COLOR_ACENTO};'>CITADEL ARCHITECTURE</h3>", unsafe_allow_html=True)
+st.sidebar.markdown("---")
+menu = st.sidebar.radio("Módulos:", ["Live Execution Desk", "Backtesting Engine"])
+rf_input = st.sidebar.number_input("Tasa Libre Riesgo (Rf) %", value=11.00, step=0.1) / 100
+rf_daily = rf_input / 252
+
+if menu == "Live Execution Desk":
+    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Live Execution Desk (Actionable Orders)</h2>", unsafe_allow_html=True)
+    
+    with st.expander("UNIVERSO DE ACTIVOS (Añadir mínimo 5)", expanded=True):
         with st.form("add_asset_form"):
-            c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-            with c1: nuevo_ticker = st.text_input("Ticker (ej. BIMBOA)")
-            with c2: nuevas_acciones = st.number_input("Cant. Acciones", min_value=1.0, step=1.0)
-            with c3: nuevo_precio = st.number_input("Precio de Compra ($)", min_value=0.01, step=1.0)
-            with c4:
+            c1, c2, c3 = st.columns([2, 1, 1])
+            with c1: nuevo_ticker = st.text_input("Ticker (ej. WALMEX)")
+            with c2: weight_actual = st.number_input("Peso Actual %", value=0.0, step=1.0) / 100
+            with c3:
                 st.markdown("<br>", unsafe_allow_html=True)
-                btn_agregar = st.form_submit_button("Agregar Activo")
+                btn_agregar = st.form_submit_button("Añadir Activo")
                 
             if btn_agregar and nuevo_ticker:
                 t_str = nuevo_ticker.strip().upper() + ".MX" if not nuevo_ticker.strip().upper().endswith(".MX") else nuevo_ticker.strip().upper()
-                st.session_state['cartera'].append({"Ticker": t_str, "Acciones": nuevas_acciones, "Precio_Compra": nuevo_precio})
+                st.session_state['cartera'].append({"Ticker": t_str, "Peso": weight_actual})
                 st.rerun()
 
-    if len(st.session_state['cartera']) > 0:
-        if st.button("Limpiar Portafolio"):
-            st.session_state['cartera'] = []
-            st.rerun()
+    if len(st.session_state['cartera']) > 0 and st.button("Limpiar Universo"):
+        st.session_state['cartera'] = []
+        st.rerun()
 
-    if len(st.session_state['cartera']) == 0:
-        st.info("Su portafolio esta vacio. Agregue activos utilizando el panel superior.")
+    # PERSISTENCIA DEL META-MODELO (Badge visual)
+    if st.session_state['meta_model'] is not None:
+        st.markdown("<span class='badge-success'>✅ Meta-Model Ridge Cargado en Memoria</span>", unsafe_allow_html=True)
     else:
-        tickers_cartera = list(set([item["Ticker"] for item in st.session_state['cartera']]))
+        st.markdown("<span class='badge-warning'>⚠️ Meta-Model No Disponible. Usando Fallback por Régimen. Corra el Backtest primero.</span>", unsafe_allow_html=True)
+    
+    if len(st.session_state['cartera']) > 4:
+        df_cart = pd.DataFrame(st.session_state['cartera']).groupby("Ticker").sum().reset_index()
+        activos_brutos = df_cart["Ticker"].tolist()
+        current_weights_dict = dict(zip(df_cart["Ticker"], df_cart["Peso"]))
+        capital_operativo = st.number_input("Capital Operativo de la Cuenta ($ MXN)", value=10000000, step=1000000)
         
-        with st.spinner("Conectando al mercado para valuar su portafolio en tiempo real..."):
-            precios_historicos = fetch_market_data(tickers_cartera, "3y")
-            
-            if precios_historicos is not None:
-                df_cartera = pd.DataFrame(st.session_state['cartera'])
-                df_cartera = df_cartera.groupby("Ticker").agg({"Acciones": "sum", "Precio_Compra": "mean"}).reset_index()
+        if st.button("⚡ Generar Órdenes para Mañana (T+1)"):
+            with st.spinner("Descargando mercado, ejecutando Machine Learning & Risk Optimization..."):
+                precios_historicos, volumen_historico = fetch_market_data(activos_brutos, "5y", use_cache=False)
                 
-                saldo_inicial_total = 0
-                saldo_actual_total = 0
-                filas_tabla = []
-                betas_dict = {}
-                capm_dict = {}
+                # VALIDACIÓN DE DATOS — MANEJO DE ERRORES
+                if precios_historicos is None:
+                    st.error("Error al descargar datos de Yahoo Finance. Verifique su conexión o los tickers ingresados.")
+                    st.stop()
                 
-                retornos = np.log(precios_historicos / precios_historicos.shift(1)).dropna()
-                ret_mercado = retornos["^MXX"]
-                rend_mercado_anual = ret_mercado.mean() * 252
+                # Excluir tickers con menos de 252 días
+                valid_tickers = [col for col in precios_historicos.columns if precios_historicos[col].count() >= 252 or col == "^MXX"]
+                excluidos = set(activos_brutos) - set(valid_tickers)
+                if excluidos:
+                    st.warning(f"Excluidos por falta de historial (mínimo 252 días): {', '.join(excluidos)}")
                 
-                for index, row in df_cartera.iterrows():
-                    t = row["Ticker"]
-                    acciones = row["Acciones"]
-                    p_compra = row["Precio_Compra"]
-                    
-                    s_inicial = acciones * p_compra
-                    saldo_inicial_total += s_inicial
-                    
-                    p_actual = precios_historicos[t].iloc[-1] if t in precios_historicos.columns else p_compra
-                    s_actual = acciones * p_actual
-                    saldo_actual_total += s_actual
-                    
-                    rend_pct = (s_actual / s_inicial) - 1
-                    beta, alpha = calc_beta_alpha_pure(retornos[t], ret_mercado, rf_daily) if t in retornos.columns else (0, 0)
-                    capm = rf_total + beta * (rend_mercado_anual - rf_total)
-                    
-                    betas_dict[t] = beta
-                    capm_dict[t] = capm
-                    
-                    filas_tabla.append({
-                        "Activo": t, "Acciones": acciones, "Precio Compra": p_compra, "Precio Actual": p_actual,
-                        "Saldo Inicial": s_inicial, "Saldo Actual": s_actual, "Rendimiento": rend_pct,
-                        "Beta": beta, "Alfa": alpha
-                    })
+                activos = [a for a in activos_brutos if a in valid_tickers]
+                if len(activos) < 5:
+                    st.error("No hay suficientes activos válidos (mínimo 5) para ejecutar el modelo de Machine Learning.")
+                    st.stop()
                 
-                df_resumen = pd.DataFrame(filas_tabla)
-                df_resumen["Peso %"] = df_resumen["Saldo Actual"] / saldo_actual_total
+                current_weights = np.array([current_weights_dict[a] for a in activos])
+                returns = calcular_retornos_robustos(precios_historicos)
                 
-                # --- MATEMATICAS AVANZADAS ---
-                beta_portafolio = sum(df_resumen["Peso %"] * df_resumen["Beta"])
-                capm_portafolio = sum(df_resumen["Peso %"] * df_resumen["Activo"].map(capm_dict))
-                rendimiento_global_pct = (saldo_actual_total / saldo_inicial_total) - 1
-                
-                activos_validos = [t for t in df_resumen["Activo"].tolist() if t in retornos.columns]
-                pesos_validos = df_resumen.set_index("Activo").loc[activos_validos, "Peso %"].values
-                
-                if len(activos_validos) > 0:
-                    ret_cartera_diario = (retornos[activos_validos] * pesos_validos).sum(axis=1)
-                    port_vol_annual = ret_cartera_diario.std() * np.sqrt(252)
-                    port_ret_annual = ret_cartera_diario.mean() * 252
-                    var_95_mxn = saldo_actual_total * (1.645 * port_vol_annual)
-                    sharpe = (port_ret_annual - rf_total) / port_vol_annual if port_vol_annual > 0 else 0
+                if len(precios_historicos) > 504:
+                    train_prices = precios_historicos.iloc[-504:]
+                    train_returns = returns.iloc[-504:]
+                    train_volumes = volumen_historico.iloc[-504:]
                 else:
-                    port_vol_annual = sharpe = var_95_mxn = 0
-
-                # -----------------------------------------------------------
-                # EL CEREBRO ANALITICO: RESUMEN INTELIGENTE
-                # -----------------------------------------------------------
-                st.markdown("---")
-                st.markdown("### 🤖 Diagnostico Automático del Portafolio")
+                    train_prices, train_returns, train_volumes = precios_historicos, returns, volumen_historico
                 
-                # Encontrar estrellas y rezagados
-                mejor_activo = df_resumen.loc[df_resumen['Rendimiento'].idxmax()]
-                peor_activo = df_resumen.loc[df_resumen['Rendimiento'].idxmin()]
-                mas_riesgoso = df_resumen.loc[df_resumen['Beta'].idxmax()]
-                activos_toxicos = df_resumen[(df_resumen['Alfa'] < 0) & (df_resumen['Beta'] > 1)]
+                alpha_stat = generate_multi_factor_alpha(train_prices[activos]).fillna(0)
+                alpha_ml = generate_panel_ml_alpha(train_prices[activos], train_returns[activos], train_volumes[activos]).fillna(0)
                 
-                mensaje_diagnostico = f"**Estado General:** Su portafolio tiene un rendimiento global de **{rendimiento_global_pct:.2%}** y una volatilidad anual estimada del **{port_vol_annual:.2%}**.<br><br>"
-                mensaje_diagnostico += f"🚀 **El Motor del Portafolio:** **{mejor_activo['Activo']}** es su mejor activo con una ganancia de **{mejor_activo['Rendimiento']:.2%}**.<br>"
-                mensaje_diagnostico += f"⚠️ **Alerta de Riesgo:** **{mas_riesgoso['Activo']}** es el activo más agresivo de su cartera (Beta: {mas_riesgoso['Beta']:.2f}). Sus fluctuaciones impactarán fuertemente su saldo.<br>"
+                regime = detect_regime_gmm(train_returns["^MXX"])
                 
-                if not activos_toxicos.empty:
-                    toxicos_str = ", ".join(activos_toxicos['Activo'].tolist())
-                    mensaje_diagnostico += f"<br>🔴 **RECOMENDACION DE SWITCH:** Se detectó que **{toxicos_str}** tienen un *Alfa negativo* a pesar de su alto riesgo. Le sugerimos evaluar la venta de estas posiciones y rotar el capital hacia activos con mejor perfil."
+                # PERSISTENCIA DEL META-MODELO (Uso real en Live Desk)
+                if st.session_state['meta_model'] is not None:
+                    curr_X = pd.DataFrame({'stat': alpha_stat.values, 'ml': alpha_ml.values})
+                    meta_alpha = pd.Series(st.session_state['meta_model'].predict(curr_X), index=activos)
                 else:
-                    mensaje_diagnostico += "<br>🟢 **Salud Optimista:** Ningún activo de alto riesgo está destruyendo valor (Alfa positivo en activos volátiles). Mantenga su estrategia actual."
+                    w_ml = 0.2 if regime == "CRISIS / VOLATILE" else 0.7
+                    meta_alpha = ((1 - w_ml) * alpha_stat) + (w_ml * alpha_ml)
+                
+                vol_forecast = train_returns[activos].ewm(span=30).std().iloc[-1] * np.sqrt(252)
+                exp_ret = meta_alpha.values * vol_forecast.values
+                
+                cov = get_ledoit_wolf_cov(train_returns[activos])
+                betas = calculate_betas(train_returns[activos], train_returns["^MXX"])
+                
+                adv_mxn = (train_prices[activos].tail(20) * train_volumes[activos].tail(20)).mean().values
+                adv_weights_max = np.clip((0.10 * adv_mxn) / capital_operativo, 0.01, 0.30)
+                
+                target_vol = 0.08 if regime == "CRISIS / VOLATILE" else 0.15
+                
+                raw_weights = optimizar_market_neutral_pro(exp_ret, cov, current_weights, betas, adv_weights_max, vol_forecast.values, regime)
+                
+                current_vol = np.sqrt(np.dot(raw_weights.T, np.dot(cov, raw_weights)))
+                new_weights = raw_weights * (target_vol / current_vol) if current_vol > 0 else raw_weights
+                
+                df_orders = pd.DataFrame({"Activo": activos, "Peso Actual": current_weights, "Peso Objetivo": new_weights})
+                df_orders["Delta (Trade)"] = df_orders["Peso Objetivo"] - df_orders["Peso Actual"]
+                
+                def classify_action(delta):
+                    if delta > 0.01: return "🟢 COMPRAR"
+                    elif delta < -0.01: return "🔴 VENDER / SHORT"
+                    else: return "⚪ MANTENER"
+                    
+                df_orders["Acción Requerida"] = df_orders["Delta (Trade)"].apply(classify_action)
+                df_orders["Capital a Mover ($)"] = df_orders["Delta (Trade)"] * capital_operativo
+                
+                st.markdown("### 🛡️ Métricas del Portafolio Objetivo")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Volatilidad Esperada Anualizada", f"{current_vol:.2%}")
+                beta_neta = np.dot(new_weights, betas)
+                c2.metric("Beta Neta Proyectada", f"{beta_neta:.4f}")
+                c3.metric("Régimen Detectado (GMM)", regime)
+                
+                if regime == "CRISIS / VOLATILE":
+                    st.markdown("<div class='alert-box'>🚨 <b>CRISIS DETECTADA:</b> El mercado presenta inestabilidad sistémica. El target de volatilidad ha sido reducido automáticamente para preservar el capital.</div>", unsafe_allow_html=True)
+                
+                for col in ["Peso Actual", "Peso Objetivo", "Delta (Trade)"]: 
+                    df_orders[col] = df_orders[col].apply(lambda x: f"{x:.2%}")
+                df_orders["Capital a Mover ($)"] = df_orders["Capital a Mover ($)"].apply(lambda x: f"${x:,.2f}")
+                
+                st.markdown(f"### 📋 Tabla de Órdenes (T+1)")
+                st.dataframe(df_orders.set_index("Activo").sort_values(by="Acción Requerida"), use_container_width=True)
+                
+                csv = df_orders.to_csv(index=False).encode('utf-8')
+                st.download_button(label="📥 Exportar Libro de Órdenes (CSV)", data=csv, file_name='execution_orders_T1.csv', mime='text/csv')
 
-                st.markdown(f"<div class='insight-box'>{mensaje_diagnostico}</div>", unsafe_allow_html=True)
-                
-                # --- DASHBOARD VISUAL ---
-                st.markdown("### Resumen de Cuenta")
-                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-                col_s1.metric("Capital Invertido", f"${saldo_inicial_total:,.2f}")
-                col_s2.metric("Valuacion de Mercado", f"${saldo_actual_total:,.2f}", f"{rendimiento_global_pct:.2%} Global")
-                col_s3.metric("Ganancia / Perdida", f"${(saldo_actual_total - saldo_inicial_total):,.2f}")
-                col_s4.metric("VaR 95% (Riesgo de Caida)", f"-${var_95_mxn:,.2f}")
+    else:
+        st.info("Agregue al menos 5 activos y asigne sus pesos para generar el libro de órdenes.")
 
-                # --- SECCION DE GRAFICOS AVANZADOS ---
-                st.markdown("---")
-                st.markdown("### Análisis Gráfico")
+elif menu == "Backtesting Engine":
+    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Purged Walk-Forward Backtest</h2>", unsafe_allow_html=True)
+    
+    if len(st.session_state['cartera']) > 4:
+        activos_brutos = list(set([item["Ticker"] for item in st.session_state['cartera']]))
+        if st.button("⚡ Ejecutar Motor Cuantitativo Completo (Heavy Compute)"):
+            with st.spinner("Procesando Panel ML, entrenando Ridge Meta-Model Causal y simulando Costos Reales..."):
+                precios_historicos, volumen_historico = fetch_market_data_cached(activos_brutos, "5y")
                 
-                tab1, tab2, tab3 = st.tabs(["📉 Backtest Histórico", "🎯 Riesgo vs Retorno", "🍩 Composición Ponderada"])
+                if precios_historicos is None:
+                    st.error("Fallo al obtener datos históricos.")
+                    st.stop()
+                    
+                valid_tickers = [col for col in precios_historicos.columns if precios_historicos[col].count() >= 252 or col == "^MXX"]
+                activos = [a for a in activos_brutos if a in valid_tickers]
                 
-                with tab1:
-                    # Grafica de retornos acumulados vs IPC
-                    if len(activos_validos) > 0:
-                        cum_ret_port = (1 + ret_cartera_diario).cumprod()
-                        cum_ret_bench = (1 + ret_mercado).cumprod()
+                oos_ret, trained_meta_model, bench_ret = backtest_walk_forward_meta_model(precios_historicos, volumen_historico, activos, rf_daily, initial_capital=10000000)
+                
+                # PERSISTENCIA DEL META-MODELO
+                if trained_meta_model is not None:
+                    st.session_state['meta_model'] = trained_meta_model
+                
+                if len(oos_ret) > 0:
+                    total_ret = np.prod(1 + oos_ret) - 1
+                    ann_ret = (1 + total_ret) ** (252/len(oos_ret)) - 1
+                    vol = oos_ret.std() * np.sqrt(252)
+                    dsr, psr = probabilistic_sharpe_ratio(oos_ret, rf_daily)
+                    
+                    sharpe = (ann_ret - (rf_daily * 252)) / vol if vol > 0 else 0
+                    drawdown, max_dd = calcular_drawdown_avanzado(oos_ret)
+                    
+                    st.markdown("##### 🏆 Métricas de Fondo Institucional (OOS)")
+                    cm1, cm2, cm3, cm4, cm5, cm6 = st.columns(6)
+                    cm1.metric("CAGR (Alpha)", f"{ann_ret:.2%}")
+                    cm2.metric("Volatilidad OOS", f"{vol:.2%}")
+                    cm3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+                    cm4.metric("Max Drawdown", f"{max_dd:.2%}")
+                    cm5.metric("PSR", f"{psr:.2%}")
+                    cm6.metric("DSR", f"{dsr:.2f}")
+                    
+                    equity = (1 + oos_ret).cumprod()
+                    equity_bench = (1 + bench_ret).cumprod()
+                    
+                    fig_oos = go.Figure()
+                    
+                    # 3. ROBUSTEZ (Alineación de overlay)
+                    shuffle_paths = monte_carlo_shuffle_test(oos_ret, n_sim=50)
+                    for path in shuffle_paths:
+                        path_len = len(path)
+                        fig_oos.add_trace(go.Scatter(
+                            x=equity.index[:path_len], 
+                            y=path, 
+                            mode='lines', 
+                            line=dict(color='gray', width=1), 
+                            opacity=0.15, 
+                            showlegend=False
+                        ))
                         
-                        fig_line = go.Figure()
-                        fig_line.add_trace(go.Scatter(x=cum_ret_port.index, y=cum_ret_port, name="Su Portafolio", line=dict(color=COLOR_ACENTO, width=3)))
-                        fig_line.add_trace(go.Scatter(x=cum_ret_bench.index, y=cum_ret_bench, name="S&P/BMV IPC", line=dict(color="#888888", width=2, dash='dot')))
-                        fig_line.update_layout(title="Crecimiento de $1 invertido (Portafolio vs Mercado)", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO, yaxis_title="Multiplicador de Capital", xaxis_title="Fecha")
-                        fig_line.update_xaxes(showgrid=True, gridcolor='#2A2D35')
-                        fig_line.update_yaxes(showgrid=True, gridcolor='#2A2D35')
-                        st.plotly_chart(fig_line, use_container_width=True)
+                    fig_oos.add_trace(go.Scatter(x=equity.index, y=equity, name="Ridge Ensemble L/S Strategy", line=dict(color=COLOR_ACENTO, width=3)))
+                    fig_oos.add_trace(go.Scatter(x=equity_bench.index, y=equity_bench, name="IPC Benchmark (^MXX)", line=dict(color="#888888", width=2, dash='dot')))
+                    fig_oos.update_layout(title="Curva de Capital Real con MC Shuffle Overlay (Neto de Slippage, CVaR Penalty, Beta=0)", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
+                    st.plotly_chart(fig_oos, use_container_width=True)
+                    
+                    fig_dd = go.Figure()
+                    fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown, fill='tozeroy', name="Drawdown", line=dict(color="#DC3545", width=2)))
+                    fig_dd.update_layout(title="Profundidad de Drawdown Histórico", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
+                    fig_dd.update_yaxes(tickformat='.1%')
+                    st.plotly_chart(fig_dd, use_container_width=True)
+                    
+                else: st.warning("Datos insuficientes para procesar el modelo matemático.")
+    else:
+        st.info("Vaya a la pestaña 'Live Execution Desk' y agregue al menos 5 activos para habilitar el Backtest.")
+        returns = calcular_retornos_robustos(precios_historicos)
                 
-                with tab2:
-                    # Scatter Plot de Riesgo (Beta) vs Retorno (Rendimiento)
-                    fig_scatter = px.scatter(
-                        df_resumen, x="Beta", y="Rendimiento", size="Saldo Actual", color="Activo", 
-                        hover_name="Activo", text="Activo", title="Mapa de Riesgo y Eficiencia"
-                    )
-                    fig_scatter.update_traces(textposition='top center', marker=dict(opacity=0.8, line=dict(width=1, color='DarkSlateGrey')))
-                    fig_scatter.add_vline(x=1.0, line_width=2, line_dash="dash", line_color="red", annotation_text="Mercado Neutral")
-                    fig_scatter.add_hline(y=0.0, line_width=2, line_dash="dash", line_color="gray")
-                    fig_scatter.update_layout(plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO, xaxis_title="Riesgo (Beta)", yaxis_title="Rendimiento Real (%)")
-                    fig_scatter.update_xaxes(showgrid=True, gridcolor='#2A2D35')
-                    fig_scatter.update_yaxes(showgrid=True, gridcolor='#2A2D35', tickformat='.1%')
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-                    st.caption("Interpretación: Busque tener sus burbujas más grandes (mayor capital) en la zona superior izquierda (Alto rendimiento, Bajo riesgo). Burbujas en la zona inferior derecha son activos tóxicos.")
+                if len(precios_historicos) > 504:
+                    train_prices = precios_historicos.iloc[-504:]
+                    train_returns = returns.iloc[-504:]
+                    train_volumes = volumen_historico.iloc[-504:]
+                else:
+                    train_prices, train_returns, train_volumes = precios_historicos, returns, volumen_historico
+                
+                alpha_stat = generate_multi_factor_alpha(train_prices[activos]).fillna(0)
+                alpha_ml = generate_panel_ml_alpha(train_prices[activos], train_returns[activos], train_volumes[activos]).fillna(0)
+                
+                regime = detect_regime_gmm(train_returns["^MXX"])
+                
+                # 3. PERSISTENCIA DEL META-MODELO (Uso real en Live Desk)
+                if st.session_state['meta_model'] is not None:
+                    curr_X = pd.DataFrame({'stat': alpha_stat.values, 'ml': alpha_ml.values})
+                    meta_alpha = pd.Series(st.session_state['meta_model'].predict(curr_X), index=activos)
+                else:
+                    w_ml = 0.2 if regime == "CRISIS / VOLATILE" else 0.7
+                    meta_alpha = ((1 - w_ml) * alpha_stat) + (w_ml * alpha_ml)
+                
+                vol_forecast = train_returns[activos].ewm(span=30).std().iloc[-1] * np.sqrt(252)
+                exp_ret = meta_alpha.values * vol_forecast.values
+                
+                cov = get_ledoit_wolf_cov(train_returns[activos])
+                betas = calculate_betas(train_returns[activos], train_returns["^MXX"])
+                
+                adv_mxn = (train_prices[activos].tail(20) * train_volumes[activos].tail(20)).mean().values
+                adv_weights_max = np.clip((0.10 * adv_mxn) / capital_operativo, 0.01, 0.30)
+                
+                target_vol = 0.08 if regime == "CRISIS / VOLATILE" else 0.15
+                
+                # 1. CÓDIGO TRUNCADO — COMPLETAR LA UI
+                raw_weights = optimizar_market_neutral_pro(exp_ret, cov, current_weights, betas, adv_weights_max, vol_forecast.values, regime)
+                
+                current_vol = np.sqrt(np.dot(raw_weights.T, np.dot(cov, raw_weights)))
+                new_weights = raw_weights * (target_vol / current_vol) if current_vol > 0 else raw_weights
+                
+                df_orders = pd.DataFrame({"Activo": activos, "Peso Actual": current_weights, "Peso Objetivo": new_weights})
+                df_orders["Delta (Trade)"] = df_orders["Peso Objetivo"] - df_orders["Peso Actual"]
+                
+                def classify_action(delta):
+                    if delta > 0.01: return "🟢 COMPRAR"
+                    elif delta < -0.01: return "🔴 VENDER / SHORT"
+                    else: return "⚪ MANTENER"
+                    
+                df_orders["Acción Requerida"] = df_orders["Delta (Trade)"].apply(classify_action)
+                df_orders["Capital a Mover ($)"] = df_orders["Delta (Trade)"] * capital_operativo
+                
+                # Display metrics & alerts
+                st.markdown("### 🛡️ Métricas del Portafolio Objetivo")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Volatilidad Esperada Anualizada", f"{current_vol:.2%}")
+                beta_neta = np.dot(new_weights, betas)
+                c2.metric("Beta Neta Proyectada", f"{beta_neta:.4f}")
+                c3.metric("Régimen Detectado (GMM)", regime)
+                
+                if regime == "CRISIS / VOLATILE":
+                    st.markdown("<div class='alert-box'>🚨 <b>CRISIS DETECTADA:</b> El mercado presenta inestabilidad sistémica. El target de volatilidad ha sido reducido automáticamente para preservar el capital.</div>", unsafe_allow_html=True)
+                
+                for col in ["Peso Actual", "Peso Objetivo", "Delta (Trade)"]: 
+                    df_orders[col] = df_orders[col].apply(lambda x: f"{x:.2%}")
+                df_orders["Capital a Mover ($)"] = df_orders["Capital a Mover ($)"].apply(lambda x: f"${x:,.2f}")
+                
+                st.markdown(f"### 📋 Tabla de Órdenes (T+1)")
+                st.dataframe(df_orders.set_index("Activo").sort_values(by="Acción Requerida"), use_container_width=True)
+                
+                csv = df_orders.to_csv(index=False).encode('utf-8')
+                st.download_button(label="📥 Exportar Libro de Órdenes (CSV)", data=csv, file_name='execution_orders_T1.csv', mime='text/csv')
 
-                with tab3:
-                    # Grafica de Pastel
-                    fig_pie = px.pie(df_resumen, values='Saldo Actual', names='Activo', hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
-                    fig_pie.update_layout(plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
-                    st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("Agregue al menos 5 activos y asigne sus pesos para generar el libro de órdenes.")
+
+elif menu == "Backtesting Engine":
+    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Purged Walk-Forward Backtest</h2>", unsafe_allow_html=True)
+    
+    if len(st.session_state['cartera']) > 4:
+        activos_brutos = list(set([item["Ticker"] for item in st.session_state['cartera']]))
+        if st.button("⚡ Ejecutar Motor Cuantitativo Completo (Heavy Compute)"):
+            with st.spinner("Procesando Panel ML, entrenando Ridge Meta-Model Causal y simulando Costos Reales..."):
+                precios_historicos, volumen_historico = fetch_market_data_cached(activos_brutos, "5y")
                 
-                # --- TABLA DE DATOS ---
-                st.markdown("---")
-                st.markdown("#### Desglose de Operaciones")
-                df_visual = df_resumen.copy()
-                df_visual["Precio Compra"] = df_visual["Precio Compra"].apply(lambda x: f"${x:,.2f}")
-                df_visual["Precio Actual"] = df_visual["Precio Actual"].apply(lambda x: f"${x:,.2f}")
-                df_visual["Saldo Actual"] = df_visual["Saldo Actual"].apply(lambda x: f"${x:,.2f}")
-                df_visual["Rendimiento"] = df_visual["Rendimiento"].apply(lambda x: f"{x:.2%}")
-                df_visual["Peso %"] = df_visual["Peso %"].apply(lambda x: f"{x:.2%}")
-                df_visual["Beta"] = df_visual["Beta"].apply(lambda x: f"{x:.2f}")
-                df_visual["Alfa"] = df_visual["Alfa"].apply(lambda x: f"{x:.2%}")
+                if precios_historicos is None:
+                    st.error("Fallo al obtener datos históricos.")
+                    st.stop()
+                    
+                valid_tickers = [col for col in precios_historicos.columns if precios_historicos[col].count() >= 252 or col == "^MXX"]
+                activos = [a for a in activos_brutos if a in valid_tickers]
                 
-                st.dataframe(df_visual[["Activo", "Acciones", "Precio Compra", "Precio Actual", "Saldo Actual", "Rendimiento", "Peso %", "Beta", "Alfa"]], use_container_width=True)
-            
-            else:
-                st.error("Ocurrio un error al descargar los precios. Verifique los tickers.")
+                # 2. BACKTESTING ENGINE — COMPLETAR MÓDULO COMPLETO
+                oos_ret, trained_meta_model, bench_ret = backtest_walk_forward_meta_model(precios_historicos, volumen_historico, activos, rf_daily, initial_capital=10000000)
+                
+                # 3. PERSISTENCIA DEL META-MODELO
+                if trained_meta_model is not None:
+                    st.session_state['meta_model'] = trained_meta_model
+                
+                if len(oos_ret) > 0:
+                    total_ret = np.prod(1 + oos_ret) - 1
+                    ann_ret = (1 + total_ret) ** (252/len(oos_ret)) - 1
+                    vol = oos_ret.std() * np.sqrt(252)
+                    dsr, psr = probabilistic_sharpe_ratio(oos_ret, rf_daily)
+                    
+                    # Calcular Sharpe estandar y Drawdown
+                    sharpe = (ann_ret - (rf_daily * 252)) / vol if vol > 0 else 0
+                    drawdown, max_dd = calcular_drawdown_avanzado(oos_ret)
+                    
+                    st.markdown("##### 🏆 Métricas de Fondo Institucional (OOS)")
+                    cm1, cm2, cm3, cm4, cm5, cm6 = st.columns(6)
+                    cm1.metric("CAGR (Alpha)", f"{ann_ret:.2%}")
+                    cm2.metric("Volatilidad OOS", f"{vol:.2%}")
+                    cm3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+                    cm4.metric("Max Drawdown", f"{max_dd:.2%}")
+                    cm5.metric("PSR", f"{psr:.2%}")
+                    cm6.metric("DSR", f"{dsr:.2f}")
+                    
+                    # Gráfica Equity Curve vs Benchmark
+                    equity = (1 + oos_ret).cumprod()
+                    equity_bench = (1 + bench_ret).cumprod()
+                    
+                    fig_oos = go.Figure()
+                    # Overlay Monte Carlo
+                    shuffle_paths = monte_carlo_shuffle_test(oos_ret, n_sim=50)
+                    for path in shuffle_paths:
+                        path_len = len(path)
+                        fig_oos.add_trace(go.Scatter(
+                            x=equity.index[:path_len], 
+                            y=path, 
+                            mode='lines', 
+                            line=dict(color='gray', width=1), 
+                            opacity=0.15, 
+                            showlegend=False
+                        ))
+                        
+                    fig_oos.add_trace(go.Scatter(x=equity.index, y=equity, name="Ridge Ensemble L/S Strategy", line=dict(color=COLOR_ACENTO, width=3)))
+                    fig_oos.add_trace(go.Scatter(x=equity_bench.index, y=equity_bench, name="IPC Benchmark (^MXX)", line=dict(color="#888888", width=2, dash='dot')))
+                    fig_oos.update_layout(title="Curva de Capital Real con MC Shuffle Overlay (Neto de Slippage, CVaR Penalty, Beta=0)", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
+                    st.plotly_chart(fig_oos, use_container_width=True)
+                    
+                    # Gráfica de Drawdown
+                    fig_dd = go.Figure()
+                    fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown, fill='tozeroy', name="Drawdown", line=dict(color="#DC3545", width=2)))
+                    fig_dd.update_layout(title="Profundidad de Drawdown Histórico", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
+                    fig_dd.update_yaxes(tickformat='.1%')
+                    st.plotly_chart(fig_dd, use_container_width=True)
+                    
+                else: st.warning("Datos insuficientes para procesar el modelo matemático.")
+    else:
+        st.info("Vaya a la pestaña 'Live Execution Desk' y agregue al menos 5 activos para habilitar el Backtest.")
