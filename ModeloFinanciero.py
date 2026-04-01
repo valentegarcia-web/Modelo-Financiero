@@ -12,7 +12,9 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.mixture import GaussianMixture
 from sklearn.linear_model import Ridge
 
-# 4. WARNINGS — MANEJO SELECTIVO
+# ==========================================
+# WARNINGS — MANEJO SELECTIVO
+# ==========================================
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn')
 warnings.filterwarnings('ignore', category=FutureWarning, module='statsmodels')
@@ -66,7 +68,6 @@ def fetch_market_data(tickers_list, period="5y", use_cache=True):
         volumes = volumes.to_frame(name=tickers[0])
     return prices.ffill().bfill(), volumes.ffill().bfill()
 
-# Wrapper con caché para backtesting
 @st.cache_data(ttl=3600)
 def fetch_market_data_cached(tickers_list, period="5y"):
     return fetch_market_data(tickers_list, period, use_cache=True)
@@ -110,7 +111,6 @@ def generate_multi_factor_alpha(prices_df):
     if signals_series.std() > 0: return (signals_series - signals_series.mean()) / signals_series.std()
     return signals_series - signals_series.mean()
 
-# 6. PERFORMANCE — CACHÉ DEL MODELO ML CON HASH_FUNCS
 @st.cache_data(
     ttl=3600,
     show_spinner=False,
@@ -247,7 +247,6 @@ def optimizar_market_neutral_pro(expected_returns, cov_matrix, current_weights, 
     
     res = minimize(neg_sharpe, current_weights, method='SLSQP', bounds=bounds, constraints=constraints)
     
-    # VALIDACIÓN DE DATOS — MANEJO DE ERRORES
     if not res.success:
         st.warning(f"⚠️ Optimizador no convergió: {res.message}. Usando pesos actuales.")
         return current_weights
@@ -373,7 +372,6 @@ if menu == "Live Execution Desk":
         st.session_state['cartera'] = []
         st.rerun()
 
-    # PERSISTENCIA DEL META-MODELO (Badge visual)
     if st.session_state['meta_model'] is not None:
         st.markdown("<span class='badge-success'>✅ Meta-Model Ridge Cargado en Memoria</span>", unsafe_allow_html=True)
     else:
@@ -389,12 +387,10 @@ if menu == "Live Execution Desk":
             with st.spinner("Descargando mercado, ejecutando Machine Learning & Risk Optimization..."):
                 precios_historicos, volumen_historico = fetch_market_data(activos_brutos, "5y", use_cache=False)
                 
-                # VALIDACIÓN DE DATOS — MANEJO DE ERRORES
                 if precios_historicos is None:
                     st.error("Error al descargar datos de Yahoo Finance. Verifique su conexión o los tickers ingresados.")
                     st.stop()
                 
-                # Excluir tickers con menos de 252 días
                 valid_tickers = [col for col in precios_historicos.columns if precios_historicos[col].count() >= 252 or col == "^MXX"]
                 excluidos = set(activos_brutos) - set(valid_tickers)
                 if excluidos:
@@ -420,7 +416,6 @@ if menu == "Live Execution Desk":
                 
                 regime = detect_regime_gmm(train_returns["^MXX"])
                 
-                # PERSISTENCIA DEL META-MODELO (Uso real en Live Desk)
                 if st.session_state['meta_model'] is not None:
                     curr_X = pd.DataFrame({'stat': alpha_stat.values, 'ml': alpha_ml.values})
                     meta_alpha = pd.Series(st.session_state['meta_model'].predict(curr_X), index=activos)
@@ -496,7 +491,6 @@ elif menu == "Backtesting Engine":
                 
                 oos_ret, trained_meta_model, bench_ret = backtest_walk_forward_meta_model(precios_historicos, volumen_historico, activos, rf_daily, initial_capital=10000000)
                 
-                # PERSISTENCIA DEL META-MODELO
                 if trained_meta_model is not None:
                     st.session_state['meta_model'] = trained_meta_model
                 
@@ -523,7 +517,6 @@ elif menu == "Backtesting Engine":
                     
                     fig_oos = go.Figure()
                     
-                    # 3. ROBUSTEZ (Alineación de overlay)
                     shuffle_paths = monte_carlo_shuffle_test(oos_ret, n_sim=50)
                     for path in shuffle_paths:
                         path_len = len(path)
@@ -541,155 +534,6 @@ elif menu == "Backtesting Engine":
                     fig_oos.update_layout(title="Curva de Capital Real con MC Shuffle Overlay (Neto de Slippage, CVaR Penalty, Beta=0)", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
                     st.plotly_chart(fig_oos, use_container_width=True)
                     
-                    fig_dd = go.Figure()
-                    fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown, fill='tozeroy', name="Drawdown", line=dict(color="#DC3545", width=2)))
-                    fig_dd.update_layout(title="Profundidad de Drawdown Histórico", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
-                    fig_dd.update_yaxes(tickformat='.1%')
-                    st.plotly_chart(fig_dd, use_container_width=True)
-                    
-                else: st.warning("Datos insuficientes para procesar el modelo matemático.")
-    else:
-        st.info("Vaya a la pestaña 'Live Execution Desk' y agregue al menos 5 activos para habilitar el Backtest.")
-        returns = calcular_retornos_robustos(precios_historicos)
-                
-                if len(precios_historicos) > 504:
-                    train_prices = precios_historicos.iloc[-504:]
-                    train_returns = returns.iloc[-504:]
-                    train_volumes = volumen_historico.iloc[-504:]
-                else:
-                    train_prices, train_returns, train_volumes = precios_historicos, returns, volumen_historico
-                
-                alpha_stat = generate_multi_factor_alpha(train_prices[activos]).fillna(0)
-                alpha_ml = generate_panel_ml_alpha(train_prices[activos], train_returns[activos], train_volumes[activos]).fillna(0)
-                
-                regime = detect_regime_gmm(train_returns["^MXX"])
-                
-                # 3. PERSISTENCIA DEL META-MODELO (Uso real en Live Desk)
-                if st.session_state['meta_model'] is not None:
-                    curr_X = pd.DataFrame({'stat': alpha_stat.values, 'ml': alpha_ml.values})
-                    meta_alpha = pd.Series(st.session_state['meta_model'].predict(curr_X), index=activos)
-                else:
-                    w_ml = 0.2 if regime == "CRISIS / VOLATILE" else 0.7
-                    meta_alpha = ((1 - w_ml) * alpha_stat) + (w_ml * alpha_ml)
-                
-                vol_forecast = train_returns[activos].ewm(span=30).std().iloc[-1] * np.sqrt(252)
-                exp_ret = meta_alpha.values * vol_forecast.values
-                
-                cov = get_ledoit_wolf_cov(train_returns[activos])
-                betas = calculate_betas(train_returns[activos], train_returns["^MXX"])
-                
-                adv_mxn = (train_prices[activos].tail(20) * train_volumes[activos].tail(20)).mean().values
-                adv_weights_max = np.clip((0.10 * adv_mxn) / capital_operativo, 0.01, 0.30)
-                
-                target_vol = 0.08 if regime == "CRISIS / VOLATILE" else 0.15
-                
-                # 1. CÓDIGO TRUNCADO — COMPLETAR LA UI
-                raw_weights = optimizar_market_neutral_pro(exp_ret, cov, current_weights, betas, adv_weights_max, vol_forecast.values, regime)
-                
-                current_vol = np.sqrt(np.dot(raw_weights.T, np.dot(cov, raw_weights)))
-                new_weights = raw_weights * (target_vol / current_vol) if current_vol > 0 else raw_weights
-                
-                df_orders = pd.DataFrame({"Activo": activos, "Peso Actual": current_weights, "Peso Objetivo": new_weights})
-                df_orders["Delta (Trade)"] = df_orders["Peso Objetivo"] - df_orders["Peso Actual"]
-                
-                def classify_action(delta):
-                    if delta > 0.01: return "🟢 COMPRAR"
-                    elif delta < -0.01: return "🔴 VENDER / SHORT"
-                    else: return "⚪ MANTENER"
-                    
-                df_orders["Acción Requerida"] = df_orders["Delta (Trade)"].apply(classify_action)
-                df_orders["Capital a Mover ($)"] = df_orders["Delta (Trade)"] * capital_operativo
-                
-                # Display metrics & alerts
-                st.markdown("### 🛡️ Métricas del Portafolio Objetivo")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Volatilidad Esperada Anualizada", f"{current_vol:.2%}")
-                beta_neta = np.dot(new_weights, betas)
-                c2.metric("Beta Neta Proyectada", f"{beta_neta:.4f}")
-                c3.metric("Régimen Detectado (GMM)", regime)
-                
-                if regime == "CRISIS / VOLATILE":
-                    st.markdown("<div class='alert-box'>🚨 <b>CRISIS DETECTADA:</b> El mercado presenta inestabilidad sistémica. El target de volatilidad ha sido reducido automáticamente para preservar el capital.</div>", unsafe_allow_html=True)
-                
-                for col in ["Peso Actual", "Peso Objetivo", "Delta (Trade)"]: 
-                    df_orders[col] = df_orders[col].apply(lambda x: f"{x:.2%}")
-                df_orders["Capital a Mover ($)"] = df_orders["Capital a Mover ($)"].apply(lambda x: f"${x:,.2f}")
-                
-                st.markdown(f"### 📋 Tabla de Órdenes (T+1)")
-                st.dataframe(df_orders.set_index("Activo").sort_values(by="Acción Requerida"), use_container_width=True)
-                
-                csv = df_orders.to_csv(index=False).encode('utf-8')
-                st.download_button(label="📥 Exportar Libro de Órdenes (CSV)", data=csv, file_name='execution_orders_T1.csv', mime='text/csv')
-
-    else:
-        st.info("Agregue al menos 5 activos y asigne sus pesos para generar el libro de órdenes.")
-
-elif menu == "Backtesting Engine":
-    st.markdown(f"<h2 style='color: {COLOR_ACENTO};'>Purged Walk-Forward Backtest</h2>", unsafe_allow_html=True)
-    
-    if len(st.session_state['cartera']) > 4:
-        activos_brutos = list(set([item["Ticker"] for item in st.session_state['cartera']]))
-        if st.button("⚡ Ejecutar Motor Cuantitativo Completo (Heavy Compute)"):
-            with st.spinner("Procesando Panel ML, entrenando Ridge Meta-Model Causal y simulando Costos Reales..."):
-                precios_historicos, volumen_historico = fetch_market_data_cached(activos_brutos, "5y")
-                
-                if precios_historicos is None:
-                    st.error("Fallo al obtener datos históricos.")
-                    st.stop()
-                    
-                valid_tickers = [col for col in precios_historicos.columns if precios_historicos[col].count() >= 252 or col == "^MXX"]
-                activos = [a for a in activos_brutos if a in valid_tickers]
-                
-                # 2. BACKTESTING ENGINE — COMPLETAR MÓDULO COMPLETO
-                oos_ret, trained_meta_model, bench_ret = backtest_walk_forward_meta_model(precios_historicos, volumen_historico, activos, rf_daily, initial_capital=10000000)
-                
-                # 3. PERSISTENCIA DEL META-MODELO
-                if trained_meta_model is not None:
-                    st.session_state['meta_model'] = trained_meta_model
-                
-                if len(oos_ret) > 0:
-                    total_ret = np.prod(1 + oos_ret) - 1
-                    ann_ret = (1 + total_ret) ** (252/len(oos_ret)) - 1
-                    vol = oos_ret.std() * np.sqrt(252)
-                    dsr, psr = probabilistic_sharpe_ratio(oos_ret, rf_daily)
-                    
-                    # Calcular Sharpe estandar y Drawdown
-                    sharpe = (ann_ret - (rf_daily * 252)) / vol if vol > 0 else 0
-                    drawdown, max_dd = calcular_drawdown_avanzado(oos_ret)
-                    
-                    st.markdown("##### 🏆 Métricas de Fondo Institucional (OOS)")
-                    cm1, cm2, cm3, cm4, cm5, cm6 = st.columns(6)
-                    cm1.metric("CAGR (Alpha)", f"{ann_ret:.2%}")
-                    cm2.metric("Volatilidad OOS", f"{vol:.2%}")
-                    cm3.metric("Sharpe Ratio", f"{sharpe:.2f}")
-                    cm4.metric("Max Drawdown", f"{max_dd:.2%}")
-                    cm5.metric("PSR", f"{psr:.2%}")
-                    cm6.metric("DSR", f"{dsr:.2f}")
-                    
-                    # Gráfica Equity Curve vs Benchmark
-                    equity = (1 + oos_ret).cumprod()
-                    equity_bench = (1 + bench_ret).cumprod()
-                    
-                    fig_oos = go.Figure()
-                    # Overlay Monte Carlo
-                    shuffle_paths = monte_carlo_shuffle_test(oos_ret, n_sim=50)
-                    for path in shuffle_paths:
-                        path_len = len(path)
-                        fig_oos.add_trace(go.Scatter(
-                            x=equity.index[:path_len], 
-                            y=path, 
-                            mode='lines', 
-                            line=dict(color='gray', width=1), 
-                            opacity=0.15, 
-                            showlegend=False
-                        ))
-                        
-                    fig_oos.add_trace(go.Scatter(x=equity.index, y=equity, name="Ridge Ensemble L/S Strategy", line=dict(color=COLOR_ACENTO, width=3)))
-                    fig_oos.add_trace(go.Scatter(x=equity_bench.index, y=equity_bench, name="IPC Benchmark (^MXX)", line=dict(color="#888888", width=2, dash='dot')))
-                    fig_oos.update_layout(title="Curva de Capital Real con MC Shuffle Overlay (Neto de Slippage, CVaR Penalty, Beta=0)", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
-                    st.plotly_chart(fig_oos, use_container_width=True)
-                    
-                    # Gráfica de Drawdown
                     fig_dd = go.Figure()
                     fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown, fill='tozeroy', name="Drawdown", line=dict(color="#DC3545", width=2)))
                     fig_dd.update_layout(title="Profundidad de Drawdown Histórico", plot_bgcolor=COLOR_FONDO, paper_bgcolor=COLOR_FONDO, font_color=COLOR_TEXTO)
